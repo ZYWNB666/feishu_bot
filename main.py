@@ -7,7 +7,8 @@
 import json
 import logging
 import sys
-from flask import Flask, jsonify, request as flask_request
+from flask import Flask, jsonify, request as flask_request, send_from_directory
+import mysql.connector
 
 # 导入配置和API客户端
 from config import config
@@ -200,7 +201,6 @@ def send_text_api():
 @app.route("/index.html")
 def index():
     """前端管理页面"""
-    from flask import send_from_directory
     return send_from_directory('static', 'index.html')
 
 
@@ -222,7 +222,6 @@ def health_check():
 def get_alert_rules():
     """获取所有告警规则"""
     try:
-        import mysql.connector
         db_config = config.get_config_db_config()
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor(dictionary=True)
@@ -255,7 +254,6 @@ def create_alert_rule():
             if field not in data:
                 return jsonify({"code": 400, "msg": f"缺少必填字段: {field}"}), 400
         
-        import mysql.connector
         db_config = config.get_config_db_config()
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor()
@@ -310,8 +308,7 @@ def update_alert_rule(rule_id):
     """更新告警规则"""
     try:
         data = flask_request.json
-        
-        import mysql.connector
+
         db_config = config.get_config_db_config()
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor()
@@ -371,7 +368,6 @@ def update_alert_rule(rule_id):
 def delete_alert_rule(rule_id):
     """删除告警规则"""
     try:
-        import mysql.connector
         db_config = config.get_config_db_config()
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor()
