@@ -24,21 +24,12 @@ class Config:
     ENCRYPT_KEY = os.getenv("ENCRYPT_KEY", "")
     
     # ==================== MySQL数据库配置 ====================
-    # 配置数据库（存储alert_config表）
-    MYSQL_CONFIG_HOST = os.getenv("MYSQL_CONFIG_HOST", "localhost")
-    MYSQL_CONFIG_PORT = int(os.getenv("MYSQL_CONFIG_PORT", "3306"))
-    MYSQL_CONFIG_USER = os.getenv("MYSQL_CONFIG_USER", "root")
-    MYSQL_CONFIG_PASSWORD = os.getenv("MYSQL_CONFIG_PASSWORD", "")
-    MYSQL_CONFIG_DATABASE = os.getenv("MYSQL_CONFIG_DATABASE", "alert_db")
-    MYSQL_CONFIG_CHARSET = os.getenv("MYSQL_CONFIG_CHARSET", "utf8mb4")
-    
-    # 告警数据库（存储alert_data表）
-    MYSQL_ALERT_HOST = os.getenv("MYSQL_ALERT_HOST", None)  # 默认与配置库相同
-    MYSQL_ALERT_PORT = int(os.getenv("MYSQL_ALERT_PORT", "3306"))
-    MYSQL_ALERT_USER = os.getenv("MYSQL_ALERT_USER", None)  # 默认与配置库相同
-    MYSQL_ALERT_PASSWORD = os.getenv("MYSQL_ALERT_PASSWORD", None)  # 默认与配置库相同
-    MYSQL_ALERT_DATABASE = os.getenv("MYSQL_ALERT_DATABASE", "alert_db")
-    MYSQL_ALERT_CHARSET = os.getenv("MYSQL_ALERT_CHARSET", "utf8mb4")
+    MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
+    MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+    MYSQL_USER = os.getenv("MYSQL_USER", "root")
+    MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+    MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "alert_db")
+    MYSQL_CHARSET = os.getenv("MYSQL_CHARSET", "utf8mb4")
     
     # ==================== 服务配置 ====================
     HOST = os.getenv("HOST", "0.0.0.0")
@@ -50,34 +41,18 @@ class Config:
     
     @classmethod
     def get_config_db_config(cls):
-        """
-        获取配置数据库连接配置
-        用于连接存储alert_config配置的数据库
-        """
+        """获取数据库连接配置"""
         return {
-            "host": cls.MYSQL_CONFIG_HOST,
-            "port": cls.MYSQL_CONFIG_PORT,
-            "user": cls.MYSQL_CONFIG_USER,
-            "password": cls.MYSQL_CONFIG_PASSWORD,
-            "database": cls.MYSQL_CONFIG_DATABASE,
-            "charset": cls.MYSQL_CONFIG_CHARSET
+            "host": cls.MYSQL_HOST,
+            "port": cls.MYSQL_PORT,
+            "user": cls.MYSQL_USER,
+            "password": cls.MYSQL_PASSWORD,
+            "database": cls.MYSQL_DATABASE,
+            "charset": cls.MYSQL_CHARSET
         }
     
-    @classmethod
-    def get_alert_db_config(cls):
-        """
-        获取告警数据库连接配置
-        用于连接存储alert_data告警记录的数据库
-        如果未单独配置，则使用配置数据库的连接信息
-        """
-        return {
-            "host": cls.MYSQL_ALERT_HOST or cls.MYSQL_CONFIG_HOST,
-            "port": cls.MYSQL_ALERT_PORT,
-            "user": cls.MYSQL_ALERT_USER or cls.MYSQL_CONFIG_USER,
-            "password": cls.MYSQL_ALERT_PASSWORD or cls.MYSQL_CONFIG_PASSWORD,
-            "database": cls.MYSQL_ALERT_DATABASE,
-            "charset": cls.MYSQL_ALERT_CHARSET
-        }
+    # 兼容旧代码
+    get_alert_db_config = get_config_db_config
     
     @classmethod
     def validate(cls):
@@ -93,12 +68,12 @@ class Config:
             errors.append("APP_SECRET 未配置")
         
         # 验证MySQL配置
-        if not cls.MYSQL_CONFIG_HOST:
-            errors.append("MYSQL_CONFIG_HOST 未配置")
-        if not cls.MYSQL_CONFIG_USER:
-            errors.append("MYSQL_CONFIG_USER 未配置")
-        if not cls.MYSQL_CONFIG_PASSWORD:
-            errors.append("MYSQL_CONFIG_PASSWORD 未配置")
+        if not cls.MYSQL_HOST:
+            errors.append("MYSQL_HOST 未配置")
+        if not cls.MYSQL_USER:
+            errors.append("MYSQL_USER 未配置")
+        if not cls.MYSQL_PASSWORD:
+            errors.append("MYSQL_PASSWORD 未配置")
         
         if errors:
             error_msg = "\n".join(errors)
@@ -115,19 +90,12 @@ class Config:
                 "APP_SECRET": "***" if cls.APP_SECRET else None,
                 "LARK_HOST": cls.LARK_HOST,
             },
-            "配置数据库": {
-                "host": cls.MYSQL_CONFIG_HOST,
-                "port": cls.MYSQL_CONFIG_PORT,
-                "user": cls.MYSQL_CONFIG_USER,
-                "password": "***" if cls.MYSQL_CONFIG_PASSWORD else None,
-                "database": cls.MYSQL_CONFIG_DATABASE,
-            },
-            "告警数据库": {
-                "host": cls.MYSQL_ALERT_HOST or cls.MYSQL_CONFIG_HOST,
-                "port": cls.MYSQL_ALERT_PORT,
-                "user": cls.MYSQL_ALERT_USER or cls.MYSQL_CONFIG_USER,
-                "password": "***" if (cls.MYSQL_ALERT_PASSWORD or cls.MYSQL_CONFIG_PASSWORD) else None,
-                "database": cls.MYSQL_ALERT_DATABASE,
+            "数据库配置": {
+                "host": cls.MYSQL_HOST,
+                "port": cls.MYSQL_PORT,
+                "user": cls.MYSQL_USER,
+                "password": "***" if cls.MYSQL_PASSWORD else None,
+                "database": cls.MYSQL_DATABASE,
             },
             "服务配置": {
                 "host": cls.HOST,

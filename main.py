@@ -308,7 +308,7 @@ def update_alert_rule(rule_id):
     """更新告警规则"""
     try:
         data = flask_request.json
-
+        
         db_config = config.get_config_db_config()
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor()
@@ -421,14 +421,10 @@ if __name__ == "__main__":
     
     # 显示配置信息
     logger.info("数据库配置:")
-    logger.info("  配置库: %s:%s/%s", 
-                config.MYSQL_CONFIG_HOST, 
-                config.MYSQL_CONFIG_PORT, 
-                config.MYSQL_CONFIG_DATABASE)
-    logger.info("  告警库: %s:%s/%s", 
-                config.MYSQL_ALERT_HOST or config.MYSQL_CONFIG_HOST,
-                config.MYSQL_ALERT_PORT,
-                config.MYSQL_ALERT_DATABASE)
+    logger.info("  MySQL: %s:%s/%s", 
+                config.MYSQL_HOST, 
+                config.MYSQL_PORT, 
+                config.MYSQL_DATABASE)
     logger.info("=" * 60)
     
     logger.info("WEB界面:")
