@@ -1,0 +1,18 @@
+# Web框架
+Flask==2.3.3
+Werkzeug==2.3.7
+
+# 环境变量管理
+python-dotenv==1.0.0
+
+# HTTP请求库
+requests==2.31.0
+
+# 加密库（飞书事件订阅需要）
+pycryptodome==3.19.0
+
+# MySQL数据库连接
+mysql-connector-python==8.2.0
+
+# 时区处理
+pytz==2024.1

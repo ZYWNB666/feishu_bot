@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.manifest
+*.spec
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+.env.local
+
+# 环境变量和配置文件
+.env
+.env.*
+!.env.example
+config.ini
+config.yaml
+*.conf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 日志文件
+*.log
+logs/
+log/
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Flask
+instance/
+.webassets-cache
+
+# 临时文件
+*.tmp
+*.bak
+*.cache
+.sass-cache/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 项目特定
+# 如有敏感信息的测试文件可以在这里添加
+test_*.py
+example_send_local.py
+

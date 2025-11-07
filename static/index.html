@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>告警规则管理 - AlertBot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+
+        .toolbar {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-danger {
+            background: #f56565;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #e53e3e;
+        }
+
+        .btn-secondary {
+            background: #718096;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #4a5568;
+        }
+
+        .table-container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead {
+            background: #f7fafc;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        th {
+            font-weight: 600;
+            color: #2d3748;
+            font-size: 14px;
+        }
+
+        td {
+            color: #4a5568;
+            font-size: 14px;
+        }
+
+        tbody tr:hover {
+            background: #f7fafc;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .badge-warning {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge-critical {
+            background: #fee;
+            color: #c53030;
+        }
+
+        .badge-info {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            overflow-y: auto;
+        }
+
+        .modal.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            max-width: 800px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .modal-header h2 {
+            color: #2d3748;
+            font-size: 24px;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 28px;
+            cursor: pointer;
+            color: #a0aec0;
+            line-height: 1;
+        }
+
+        .close-btn:hover {
+            color: #4a5568;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #2d3748;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        .form-group label .required {
+            color: #f56565;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #e2e8f0;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .form-group small {
+            display: block;
+            margin-top: 5px;
+            color: #718096;
+            font-size: 12px;
+        }
+
+        .form-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .label-rules-container {
+            border: 1px solid #e2e8f0;
+            border-radius: 5px;
+            padding: 15px;
+            background: #f7fafc;
+        }
+
+        .label-rule-item {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+            align-items: center;
+        }
+
+        .label-rule-item input {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+        }
+
+        .label-rule-item input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .label-rule-item .rule-key {
+            min-width: 200px;
+        }
+
+        .label-rule-item .rule-value {
+            min-width: 200px;
+        }
+
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #a0aec0;
+        }
+
+        .empty-state svg {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #a0aec0;
+        }
+
+        .actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-icon {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .tag-input-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 8px;
+            border: 1px solid #e2e8f0;
+            border-radius: 5px;
+            min-height: 42px;
+        }
+
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background: #667eea;
+            color: white;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .tag-remove {
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .tag-input {
+            border: none;
+            outline: none;
+            flex: 1;
+            min-width: 150px;
+            padding: 4px;
+        }
+
+        .info-box {
+            background: #ebf8ff;
+            border-left: 4px solid #3182ce;
+            padding: 12px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+
+        .info-box p {
+            color: #2c5282;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        /* 提示消息样式 */
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: white;
+            padding: 16px 24px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 300px;
+            opacity: 0;
+            transform: translateX(400px);
+            transition: all 0.3s ease;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        .toast.success {
+            border-left: 4px solid #48bb78;
+        }
+
+        .toast.error {
+            border-left: 4px solid #f56565;
+        }
+
+        .toast-icon {
+            font-size: 24px;
+        }
+
+        .toast-content {
+            flex: 1;
+        }
+
+        .toast-title {
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: #2d3748;
+        }
+
+        .toast-message {
+            font-size: 14px;
+            color: #4a5568;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔔 告警规则管理</h1>
+            <p>管理Prometheus告警通知规则和飞书群组配置</p>
+        </div>
+
+        <div class="toolbar">
+            <div>
+                <span style="color: #718096; font-size: 14px;">共 <strong id="ruleCount">0</strong> 条规则</span>
+            </div>
+            <button class="btn btn-primary" onclick="openModal()">
+                ➕ 新建规则
+            </button>
+        </div>
+
+        <div class="table-container">
+            <div id="loading" class="loading">
+                <p>加载中...</p>
+            </div>
+            <div id="emptyState" class="empty-state" style="display: none;">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path>
+                </svg>
+                <h3>暂无规则</h3>
+                <p>点击上方"新建规则"按钮创建第一条告警规则</p>
+            </div>
+            <table id="rulesTable" style="display: none;">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Alert ID</th>
+                        <th>项目</th>
+                        <th>群组ID</th>
+                        <th>通知人员</th>
+                        <th>告警级别</th>
+                        <th>标签规则</th>
+                        <th>备注</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="rulesTableBody">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 新建/编辑规则弹窗 -->
+    <div id="ruleModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">新建告警规则</h2>
+                <button class="close-btn" onclick="closeModal()">&times;</button>
+            </div>
+            
+            <form id="ruleForm" onsubmit="submitForm(event)">
+                <div class="info-box">
+                    <p><strong>💡 配置说明：</strong>告警规则支持两种匹配方式：</p>
+                    <p>1️⃣ <strong>Alert ID匹配</strong>：在Prometheus告警规则中配置alert_id标签</p>
+                    <p>2️⃣ <strong>标签路由匹配</strong>：通过正则表达式匹配告警标签（优先级更高）</p>
+                </div>
+
+                <div class="form-group">
+                    <label>Alert ID <span class="required">*</span></label>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="text" id="alert_id" name="alert_id" required readonly
+                               placeholder="自动生成" style="flex: 1;">
+                        <button type="button" id="generateBtn" class="btn btn-secondary" onclick="generateAlertId()">生成</button>
+                        <button type="button" class="btn btn-secondary" onclick="copyAlertId()">复制</button>
+                    </div>
+                    <small>9位大写字母和数字组成的唯一标识，用于在Prometheus Rule中匹配</small>
+                </div>
+
+                <div class="form-group">
+                    <label>项目名称 <span class="required">*</span></label>
+                    <input type="text" id="project" name="project" required 
+                           placeholder="例如: production-web">
+                    <small>项目标识，方便管理</small>
+                </div>
+
+                <div class="form-group">
+                    <label>群组ID <span class="required">*</span></label>
+                    <input type="text" id="group_id" name="group_id" required 
+                           placeholder="例如: oc_xxxxxxxxxxxxxxxx">
+                    <small>飞书群聊ID，机器人进群后会显示</small>
+                </div>
+
+                <div class="form-group">
+                    <label>通知人员ID <span class="required">*</span></label>
+                    <div class="tag-input-container" id="usersContainer" onclick="focusUserInput()">
+                        <input type="text" class="tag-input" id="userInput" 
+                               placeholder="输入人员ID后按回车添加（如：ou_xxxxx）" 
+                               onkeydown="handleUserInput(event)">
+                    </div>
+                    <small>需要@的人员ID列表（飞书用户open_id），支持多个，按回车添加</small>
+                </div>
+
+                <div class="form-group">
+                    <label>艾特告警级别 <span class="required">*</span></label>
+                    <input type="text" id="rank" name="rank" required 
+                           placeholder="例如: critical,warning"
+                           value="critical,warning">
+                    <small>达到这些级别时艾特人员，多个级别用逗号分隔</small>
+                </div>
+
+                <div class="form-group">
+                    <label>Alertmanager地址 <span class="required">*</span></label>
+                    <input type="url" id="alertmanager_url" name="alertmanager_url" required 
+                           placeholder="例如: http://alertmanager:9093">
+                    <small>Alertmanager服务地址</small>
+                </div>
+
+                <div class="form-group">
+                    <label>标签路由规则（支持正则表达式）</label>
+                    <div class="label-rules-container" id="labelRulesContainer">
+                        <div style="margin-bottom: 10px; color: #718096; font-size: 13px;">
+                            键和值都支持正则表达式，例如：severity 匹配 critical，或 instance 匹配 .*prod.*
+                        </div>
+                        <div id="labelRulesList">
+                            <!-- 动态添加的标签规则 -->
+                        </div>
+                        <button type="button" class="btn btn-secondary btn-small" onclick="addLabelRule()">
+                            ➕ 添加标签规则
+                        </button>
+                    </div>
+                    <small>留空则只使用Alert ID匹配，标签匹配优先级更高</small>
+                </div>
+
+                <div class="form-group">
+                    <label>备注</label>
+                    <textarea id="remark" name="remark" 
+                              placeholder="例如: 生产环境核心服务告警"></textarea>
+                    <small>规则说明，方便管理（最多100个汉字）</small>
+                </div>
+
+                <input type="hidden" id="rule_id" name="rule_id">
+
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+        let currentUsers = [];
+        let editingRuleId = null;
+        let labelRuleCounter = 0;
+
+        // 显示提示消息
+        function showToast(message, type = 'success') {
+            // 移除已存在的toast
+            const existingToast = document.querySelector('.toast');
+            if (existingToast) {
+                existingToast.remove();
+            }
+
+            // 创建新的toast
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            
+            const icon = type === 'success' ? '✅' : '❌';
+            const title = type === 'success' ? '成功' : '错误';
+            
+            toast.innerHTML = `
+                <div class="toast-icon">${icon}</div>
+                <div class="toast-content">
+                    <div class="toast-title">${title}</div>
+                    <div class="toast-message">${message}</div>
+                </div>
+            `;
+            
+            document.body.appendChild(toast);
+            
+            // 触发动画
+            setTimeout(() => toast.classList.add('show'), 10);
+            
+            // 3秒后自动移除
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // 页面加载时获取规则列表
+        document.addEventListener('DOMContentLoaded', function() {
+            loadRules();
+        });
+
+        // 加载规则列表
+        async function loadRules() {
+            try {
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('emptyState').style.display = 'none';
+                document.getElementById('rulesTable').style.display = 'none';
+
+                const response = await fetch(`${API_BASE}/api/alert_rules`);
+                const result = await response.json();
+
+                document.getElementById('loading').style.display = 'none';
+
+                if (result.code === 0 && result.data.length > 0) {
+                    displayRules(result.data);
+                    document.getElementById('ruleCount').textContent = result.data.length;
+                } else {
+                    document.getElementById('emptyState').style.display = 'block';
+                    document.getElementById('ruleCount').textContent = '0';
+                }
+            } catch (error) {
+                console.error('加载规则失败:', error);
+                document.getElementById('loading').innerHTML = '<p style="color: #f56565;">加载失败，请刷新重试</p>';
+            }
+        }
+
+        // 显示规则列表
+        function displayRules(rules) {
+            const tbody = document.getElementById('rulesTableBody');
+            tbody.innerHTML = '';
+
+            rules.forEach(rule => {
+                const tr = document.createElement('tr');
+                
+                // 解析users
+                let users = [];
+                try {
+                    users = JSON.parse(rule.users || '[]');
+                } catch (e) {
+                    users = [];
+                }
+
+                // 解析label_rules
+                let labelRulesDisplay = '-';
+                if (rule.label_rules) {
+                    try {
+                        const labelRules = JSON.parse(rule.label_rules);
+                        labelRulesDisplay = Object.keys(labelRules).length > 0 
+                            ? `<span class="badge badge-info">✓ ${Object.keys(labelRules).length}条</span>` 
+                            : '-';
+                    } catch (e) {
+                        labelRulesDisplay = '-';
+                    }
+                }
+
+                tr.innerHTML = `
+                    <td>${rule.id}</td>
+                    <td><strong>${rule.alert_id}</strong></td>
+                    <td>${rule.project}</td>
+                    <td><code>${rule.group_id}</code></td>
+                    <td>${users.length}人</td>
+                    <td>
+                        ${rule.rank.split(',').map(r => {
+                            const rank = r.trim();
+                            const badgeClass = rank === 'critical' ? 'badge-critical' : 'badge-warning';
+                            return `<span class="badge ${badgeClass}">${rank}</span>`;
+                        }).join(' ')}
+                    </td>
+                    <td>${labelRulesDisplay}</td>
+                    <td>${rule.remark || '-'}</td>
+                    <td class="actions">
+                        <button class="btn btn-secondary btn-icon" onclick="editRule(${rule.id})">编辑</button>
+                        <button class="btn btn-danger btn-icon" onclick="deleteRule(${rule.id}, '${rule.alert_id}')">删除</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            document.getElementById('rulesTable').style.display = 'table';
+        }
+
+        // 打开弹窗
+        function openModal(isEdit = false) {
+            document.getElementById('modalTitle').textContent = isEdit ? '编辑告警规则' : '新建告警规则';
+            document.getElementById('ruleModal').classList.add('active');
+            
+            const generateBtn = document.getElementById('generateBtn');
+            
+            if (!isEdit) {
+                editingRuleId = null;
+                document.getElementById('ruleForm').reset();
+                currentUsers = [];
+                labelRuleCounter = 0;
+                document.getElementById('labelRulesList').innerHTML = '';
+                renderUserTags();
+                generateAlertId(); // 自动生成Alert ID
+                generateBtn.style.display = 'inline-block'; // 显示生成按钮
+            } else {
+                generateBtn.style.display = 'none'; // 编辑时隐藏生成按钮
+            }
+        }
+
+        // 关闭弹窗
+        function closeModal() {
+            document.getElementById('ruleModal').classList.remove('active');
+            document.getElementById('ruleForm').reset();
+            currentUsers = [];
+            editingRuleId = null;
+            labelRuleCounter = 0;
+            document.getElementById('labelRulesList').innerHTML = '';
+            renderUserTags();
+        }
+
+        // 生成Alert ID（9位大写字母和数字）
+        function generateAlertId() {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            let result = '';
+            for (let i = 0; i < 9; i++) {
+                result += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            document.getElementById('alert_id').value = result;
+        }
+
+        // 复制Alert ID
+        function copyAlertId() {
+            const alertId = document.getElementById('alert_id').value;
+            if (!alertId) {
+                showToast('请先生成Alert ID', 'error');
+                return;
+            }
+            
+            navigator.clipboard.writeText(alertId).then(() => {
+                showToast('已复制到剪贴板: ' + alertId);
+            }).catch(err => {
+                // 降级方案
+                const input = document.getElementById('alert_id');
+                input.select();
+                document.execCommand('copy');
+                showToast('已复制到剪贴板: ' + alertId);
+            });
+        }
+
+        // 添加标签规则
+        function addLabelRule(key = '', value = '') {
+            const id = labelRuleCounter++;
+            const rulesList = document.getElementById('labelRulesList');
+            
+            const ruleItem = document.createElement('div');
+            ruleItem.className = 'label-rule-item';
+            ruleItem.id = `label-rule-${id}`;
+            ruleItem.innerHTML = `
+                <input type="text" class="rule-key" placeholder="标签键（支持正则）" 
+                       value="${key}" data-rule-id="${id}">
+                <span style="color: #a0aec0;">:</span>
+                <input type="text" class="rule-value" placeholder="标签值（支持正则）" 
+                       value="${value}" data-rule-id="${id}">
+                <button type="button" class="btn btn-danger btn-small" onclick="removeLabelRule(${id})">删除</button>
+            `;
+            
+            rulesList.appendChild(ruleItem);
+        }
+
+        // 删除标签规则
+        function removeLabelRule(id) {
+            const ruleItem = document.getElementById(`label-rule-${id}`);
+            if (ruleItem) {
+                ruleItem.remove();
+            }
+        }
+
+        // 获取标签规则
+        function getLabelRules() {
+            const rules = {};
+            const ruleItems = document.querySelectorAll('.label-rule-item');
+            
+            ruleItems.forEach(item => {
+                const keyInput = item.querySelector('.rule-key');
+                const valueInput = item.querySelector('.rule-value');
+                
+                const key = keyInput.value.trim();
+                const value = valueInput.value.trim();
+                
+                if (key && value) {
+                    rules[key] = value;
+                }
+            });
+            
+            return Object.keys(rules).length > 0 ? rules : null;
+        }
+
+        // 处理用户输入
+        function handleUserInput(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                const input = event.target;
+                const userId = input.value.trim();
+                
+                if (userId) {
+                    if (!currentUsers.includes(userId)) {
+                        currentUsers.push(userId);
+                        renderUserTags();
+                        input.value = '';
+                    } else {
+                        showToast('该人员ID已添加', 'error');
+                    }
+                }
+            }
+        }
+
+        // 渲染用户标签
+        function renderUserTags() {
+            const container = document.getElementById('usersContainer');
+            const input = document.getElementById('userInput');
+            
+            // 清除现有标签
+            const existingTags = container.querySelectorAll('.tag');
+            existingTags.forEach(tag => tag.remove());
+            
+            // 添加新标签
+            currentUsers.forEach((email, index) => {
+                const tag = document.createElement('div');
+                tag.className = 'tag';
+                tag.innerHTML = `
+                    ${email}
+                    <span class="tag-remove" onclick="removeUser(${index})">×</span>
+                `;
+                container.insertBefore(tag, input);
+            });
+        }
+
+        // 移除用户
+        function removeUser(index) {
+            currentUsers.splice(index, 1);
+            renderUserTags();
+        }
+
+        // 聚焦输入框
+        function focusUserInput() {
+            document.getElementById('userInput').focus();
+        }
+
+        // 提交表单
+        async function submitForm(event) {
+            event.preventDefault();
+            
+            if (currentUsers.length === 0) {
+                showToast('请至少添加一个通知人员ID', 'error');
+                return;
+            }
+
+            const formData = {
+                alert_id: document.getElementById('alert_id').value,
+                project: document.getElementById('project').value,
+                group_id: document.getElementById('group_id').value,
+                users: currentUsers,
+                rank: document.getElementById('rank').value,
+                alertmanager_url: document.getElementById('alertmanager_url').value,
+                remark: document.getElementById('remark').value || null,
+                label_rules: getLabelRules()
+            };
+
+            try {
+                let url = `${API_BASE}/api/alert_rules`;
+                let method = 'POST';
+
+                if (editingRuleId) {
+                    url += `/${editingRuleId}`;
+                    method = 'PUT';
+                }
+
+                const response = await fetch(url, {
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(formData)
+                });
+
+                const result = await response.json();
+
+                if (result.code === 0) {
+                    showToast(editingRuleId ? '更新成功' : '创建成功');
+                    closeModal();
+                    loadRules();
+                } else {
+                    showToast('操作失败: ' + result.msg, 'error');
+                }
+            } catch (error) {
+                console.error('提交失败:', error);
+                showToast('操作失败，请重试', 'error');
+            }
+        }
+
+        // 编辑规则
+        async function editRule(id) {
+            try {
+                const response = await fetch(`${API_BASE}/api/alert_rules`);
+                const result = await response.json();
+                
+                if (result.code === 0) {
+                    const rule = result.data.find(r => r.id === id);
+                    if (rule) {
+                        editingRuleId = id;
+                        
+                        // 填充表单
+                        document.getElementById('alert_id').value = rule.alert_id;
+                        document.getElementById('project').value = rule.project;
+                        document.getElementById('group_id').value = rule.group_id;
+                        document.getElementById('rank').value = rule.rank;
+                        document.getElementById('alertmanager_url').value = rule.alertmanager_url;
+                        document.getElementById('remark').value = rule.remark || '';
+                        
+                        // 填充users
+                        try {
+                            currentUsers = JSON.parse(rule.users || '[]');
+                        } catch (e) {
+                            currentUsers = [];
+                        }
+                        renderUserTags();
+                        
+                        // 填充label_rules
+                        document.getElementById('labelRulesList').innerHTML = '';
+                        labelRuleCounter = 0;
+                        if (rule.label_rules) {
+                            try {
+                                const labelRules = JSON.parse(rule.label_rules);
+                                for (const [key, value] of Object.entries(labelRules)) {
+                                    addLabelRule(key, value);
+                                }
+                            } catch (e) {
+                                console.error('解析label_rules失败:', e);
+                            }
+                        }
+                        
+                        openModal(true);
+                    }
+                }
+            } catch (error) {
+                console.error('加载规则详情失败:', error);
+                showToast('加载失败，请重试', 'error');
+            }
+        }
+
+        // 删除规则
+        async function deleteRule(id, alertId) {
+            if (!confirm(`确定要删除规则 "${alertId}" 吗？此操作不可恢复。`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/api/alert_rules/${id}`, {
+                    method: 'DELETE'
+                });
+
+                const result = await response.json();
+
+                if (result.code === 0) {
+                    showToast('删除成功');
+                    loadRules();
+                } else {
+                    showToast('删除失败: ' + result.msg, 'error');
+                }
+            } catch (error) {
+                console.error('删除失败:', error);
+                showToast('删除失败，请重试', 'error');
+            }
+        }
+    </script>
+</body>
+</html>
+
