@@ -91,6 +91,8 @@ def handle_message_received(feishu_client, event_data):
         event = event_data.get("event", {})
         message = event.get("message", {})
         sender = event.get("sender", {})
+
+        logging.debug("Received message content: %s", event)
         
         # 获取消息内容
         content_str = message.get("content")
@@ -113,6 +115,12 @@ def handle_message_received(feishu_client, event_data):
         
         # 获取发送者信息
         sender_id = sender.get("sender_id", {}).get("open_id")
+
+        # 获取group ID
+        chat_type = event.get("message").get("chat_type")
+        group_id = None
+        if chat_type == "group":
+            group_id = event.get("message").get("chat_id")
         
         # 检查是否有@机器人
         mentions = message.get("mentions", [])
@@ -156,7 +164,7 @@ def handle_message_received(feishu_client, event_data):
                         "tag": "div",
                         "text": {
                             "tag": "lark_md",
-                            "content": "**help** - 显示此帮助信息\n**myuid** - 查看你的用户ID"
+                            "content": "**help** - 显示此帮助信息\n**myuid** - 查看你的用户ID\n**groupid** - 查看当前群组ID"
                         }
                     }
                 ]
@@ -200,6 +208,56 @@ def handle_message_received(feishu_client, event_data):
             reply_content = json.dumps(card_data)
             feishu_client.reply_message(message_id, "interactive", reply_content)
             logger.info(f"已回复myuid命令给用户 {sender_id}")
+
+        elif command == "groupid":
+            # 检查是否在群聊中
+            if chat_type != "group":
+                error_card = {
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"tag": "plain_text", "content": "⚠️ 提示"},
+                        "template": "yellow"
+                    },
+                    "elements": [{
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": "**此命令仅在群聊中可用**"
+                        }
+                    }]
+                }
+                reply_content = json.dumps(error_card)
+                feishu_client.reply_message(message_id, "interactive", reply_content)
+                logger.info(f"用户 {sender_id} 在非群聊环境中使用groupid命令")
+                return True
+            
+            # 构建卡片消息（支持 Markdown）
+            card_data = {
+                "config": {
+                    "wide_screen_mode": True
+                },
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "🆔 群组信息"
+                    },
+                    "template": "green"
+                },
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": f"**群组ID：**\n{group_id}"
+                        }
+                    },
+                ]
+            }
+            
+            # 使用引用回复（卡片消息）
+            reply_content = json.dumps(card_data)
+            feishu_client.reply_message(message_id, "interactive", reply_content)
+            logger.info(f"已回复groupid命令给用户 {sender_id}")
             
         else:
             logger.debug(f"收到未知命令: {command}")

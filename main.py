@@ -6,8 +6,9 @@
 
 import json
 import logging
+import re
 import sys
-from flask import Flask, jsonify, request as flask_request, send_from_directory
+from flask import Flask, jsonify, request as flask_request, send_from_directory, request
 import mysql.connector
 
 # 导入配置和API客户端
@@ -17,9 +18,12 @@ from feishu_utils.event_handler import feishu_event
 from feishu_utils.callback_handler import process_card_callback
 from feishu_utils.alert_handler import process_alert_request
 
+# gitlab webhook 消息处理
+from gitlab_utils.pipeline_msg_format import json_processing
+
 # 配置日志
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -196,6 +200,33 @@ def send_text_api():
         logger.error(f"发送文本消息失败: {e}")
         return jsonify({"code": 500, "msg": str(e)}), 500
 
+@app.route('/api/gitlab-pipeline-status', methods=['POST'])
+def gitlab_pipeline_status():
+    data = request.get_json()
+    try:
+        if not data:
+            return jsonify({"code": 400, "msg": "No data provided"}), 400
+        headers = request.headers
+        group_id = headers.get("X-Gitlab-Token") if headers else None
+        result, status_code = json_processing(group_id, data, feishu_client)
+        return result, status_code
+    except Exception as e:
+        logger.error(f"Gitlab pipeline status failed: {e}", exc_info=True)
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+@app.route('/api/json', methods=['GET', 'POST'])
+def json_api():
+    if request.method == 'POST':
+        data = request.get_json()
+        headers = request.headers
+        if headers:
+            logger.info("Received headers: %s", headers)
+        logger.info("Received data: %s", data)
+        if not data:
+            logger.error("Received empty data")
+            return jsonify({"error": "No data provided"})
+        return jsonify({"message": "Test API received data!", "data": data})
+    return jsonify({"message": "Test API is working!"})
 
 @app.route("/")
 @app.route("/index.html")
