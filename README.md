@@ -305,6 +305,8 @@ receivers:
 - ✅ **成功**: 显示项目名称、提交信息、所有步骤状态
 - ❌ **失败**: 显示项目名称、提交信息、**具体失败的步骤**（stage + job 名称）
 
+![gitlab-pipeline消息推送](./img/pipeline_webhook.png)
+
 ### 机器人命令
 
 在飞书群聊中@机器人：
