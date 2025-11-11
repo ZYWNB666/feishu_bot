@@ -429,10 +429,14 @@ LOG_LEVEL=DEBUG  # DEBUG, INFO, WARNING, ERROR
 ## ⚠️ 注意事项
 
 1. **权限配置**：确保机器人已加入目标群聊，并配置了必要的权限
-2. **网络访问**：飞书服务器需要能访问你的回调地址（公网或内网穿透）
+2. **网络访问**：飞书服务器和 GitLab 服务器需要能访问你的回调地址（公网或内网穿透）
 3. **HTTPS**：生产环境建议使用 HTTPS
 4. **数据库**：确保 MySQL 数据库已启动并可访问
 5. **环境变量**：不要将 `.env` 文件提交到版本控制系统
+6. **GitLab Webhook**：
+   - 在配置 GitLab Webhook 时，Secret Token 填写的是飞书群聊ID（`oc_xxx`格式）
+   - 仅支持 Pipeline events 类型的 webhook
+   - 只推送 success 和 failed 状态的 Pipeline，其他状态会被忽略
 
 ## 📚 更多文档
 
@@ -451,4 +455,5 @@ MIT
 
 - [飞书开放平台](https://open.feishu.cn/)
 - [Alertmanager 文档](https://prometheus.io/docs/alerting/latest/alertmanager/)
+- [GitLab Webhooks 文档](https://docs.gitlab.com/ee/user/project/integrations/webhooks.html)
 - [Flask 文档](https://flask.palletsprojects.com/)
