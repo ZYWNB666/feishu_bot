@@ -145,37 +145,7 @@ def handle_message_received(feishu_client, event_data):
         # 获取消息ID（用于引用回复）
         message_id = message.get("message_id")
         
-        # 定义命令处理
-        if command == "help":
-            # 构建卡片消息（支持 Markdown）
-            card_data = {
-                "config": {
-                    "wide_screen_mode": True
-                },
-                "header": {
-                    "title": {
-                        "tag": "plain_text",
-                        "content": "📖 可用命令列表"
-                    },
-                    "template": "blue"
-                },
-                "elements": [
-                    {
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": "**help** - 显示此帮助信息\n**myuid** - 查看你的用户ID\n**groupid** - 查看当前群组ID"
-                        }
-                    }
-                ]
-            }
-            
-            # 使用引用回复（卡片消息）
-            reply_content = json.dumps(card_data)
-            feishu_client.reply_message(message_id, "interactive", reply_content)
-            logger.info(f"已回复help命令给用户 {sender_id}")
-            
-        elif command == "myuid":
+        if command == "myuid":
             # 构建卡片消息（支持 Markdown）
             if sender_id:
                 uid_text = f"**您的用户ID：**\n{sender_id}"
@@ -260,6 +230,33 @@ def handle_message_received(feishu_client, event_data):
             logger.info(f"已回复groupid命令给用户 {sender_id}")
             
         else:
+            # 构建卡片消息（支持 Markdown）
+            card_data = {
+                "config": {
+                    "wide_screen_mode": True
+                },
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "📖 可用命令列表"
+                    },
+                    "template": "blue"
+                },
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": "**help** - 显示此帮助信息\n**myuid** - 查看你的用户ID\n**groupid** - 查看当前群组ID"
+                        }
+                    }
+                ]
+            }
+            
+            # 使用引用回复（卡片消息）
+            reply_content = json.dumps(card_data)
+            feishu_client.reply_message(message_id, "interactive", reply_content)
+            logger.info(f"已回复help命令给用户 {sender_id}")
             logger.debug(f"收到未知命令: {command}")
         
         return True
