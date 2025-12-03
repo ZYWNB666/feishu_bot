@@ -39,6 +39,14 @@ class Config:
     # ==================== 日志配置 ====================
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     
+    # ==================== Jira配置 ====================
+    JIRA_URL = os.getenv("JIRA_URL", "https://jira.magikcloud.cn")
+    JIRA_USERNAME = os.getenv("JIRA_USERNAME", "admin")
+    JIRA_PASSWORD = os.getenv("JIRA_PASSWORD", "XfJjKizUr7PSq6U")
+    # 允许的邮箱后缀列表，多个后缀用逗号分隔，如 "@company.com,@example.com"
+    # 留空则不限制邮箱后缀
+    JIRA_ALLOWED_EMAIL_SUFFIXES = os.getenv("JIRA_ALLOWED_EMAIL_SUFFIXES", "")
+    
     @classmethod
     def get_config_db_config(cls):
         """获取数据库连接配置"""
