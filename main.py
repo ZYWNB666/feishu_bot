@@ -79,6 +79,7 @@ def alert_api():
     告警API
     委托给 alert_handler 模块处理具体逻辑
     """
+    logger.debug("Received alert request: %s", flask_request.json)
     data = flask_request.json
     result, status_code = process_alert_request(data, feishu_client)
     return jsonify(result), status_code
