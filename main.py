@@ -17,6 +17,7 @@ from feishu_utils.feishu_api import FeishuApiClient, FeishuApiException
 from feishu_utils.event_handler import feishu_event
 from feishu_utils.callback_handler import process_card_callback
 from feishu_utils.alert_handler import process_alert_request
+from feishu_utils.ws_client import start_ws_client_in_thread
 
 # gitlab webhook 消息处理
 from gitlab_utils.pipeline_msg_format import json_processing
@@ -471,10 +472,13 @@ if __name__ == "__main__":
     logger.info("  - POST /api/v1/alerts      接收告警")
     logger.info("  - POST /api/send_text      发送文本消息")
     logger.info("  - POST /api/send_message   发送完整消息")
-    logger.info("  - POST /webhook/event      飞书事件回调（URL验证）")
+    logger.info("  - POST /webhook/event      飞书事件回调（备用，长连接模式下无需暴露）")
     logger.info("=" * 60)
     logger.info("🌐 服务地址: http://%s:%s", config.HOST, config.PORT)
     logger.info("🎨 管理页面: http://%s:%s/", config.HOST, config.PORT)
     logger.info("=" * 60)
-    
+
+    # 启动飞书 WebSocket 长连接（守护线程，自动重连）
+    start_ws_client_in_thread(config.APP_ID, config.APP_SECRET, feishu_client)
+
     app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)
