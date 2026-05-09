@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import sys
-from flask import Flask, jsonify, request as flask_request, send_from_directory, request
+from flask import Flask, jsonify, request as flask_request, send_from_directory
 import mysql.connector
 
 # 导入配置和API客户端
@@ -28,6 +28,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# 始终抑制 websockets 协议层心跳日志（keepalive ping/pong 对业务无意义）
+logging.getLogger("websockets").setLevel(logging.WARNING)
+logging.getLogger("websockets.client").setLevel(logging.WARNING)
 
 # 验证配置
 try:
@@ -60,7 +64,7 @@ def handle_404(error):
 @app.errorhandler(Exception)
 def handle_error(error):
     """全局错误处理"""
-    logger.error(f"发生错误: {error}", exc_info=True)
+    logger.error("发生错误: %s", error, exc_info=True)
     
     if isinstance(error, FeishuApiException):
         return jsonify({
@@ -126,7 +130,7 @@ def send_message_api():
             content_str = content
         
         # 发送消息
-        logger.info(f"发送消息到 {receive_id_type}:{receive_id}")
+        logger.info("发送消息到 %s:%s", receive_id_type, receive_id)
         feishu_client.send(receive_id_type, receive_id, msg_type, content_str)
         
         return jsonify({
@@ -179,7 +183,7 @@ def send_text_api():
         
         if chat_id:
             # 发送到群聊
-            logger.info(f"发送文本消息到群聊: {chat_id}")
+            logger.info("发送文本消息到群聊: %s", chat_id)
             feishu_client.send("chat_id", chat_id, "text", content)
             return jsonify({
                 "code": 0,
@@ -188,7 +192,7 @@ def send_text_api():
             })
         elif open_id:
             # 发送给个人
-            logger.info(f"发送文本消息到用户: {open_id}")
+            logger.info("发送文本消息到用户: %s", open_id)
             feishu_client.send("open_id", open_id, "text", content)
             return jsonify({
                 "code": 0,
@@ -199,28 +203,29 @@ def send_text_api():
             return jsonify({"code": 400, "msg": "chat_id和open_id至少提供一个"}), 400
             
     except Exception as e:
-        logger.error(f"发送文本消息失败: {e}")
+        logger.error("发送文本消息失败: %s", e)
         return jsonify({"code": 500, "msg": str(e)}), 500
+
 
 @app.route('/api/gitlab-pipeline-status', methods=['POST'])
 def gitlab_pipeline_status():
-    data = request.get_json()
+    data = flask_request.get_json()
     try:
         if not data:
             return jsonify({"code": 400, "msg": "No data provided"}), 400
-        headers = request.headers
+        headers = flask_request.headers
         group_id = headers.get("X-Gitlab-Token") if headers else None
         result, status_code = json_processing(group_id, data, feishu_client)
         return result, status_code
     except Exception as e:
-        logger.error(f"Gitlab pipeline status failed: {e}", exc_info=True)
+        logger.error("展示Gitlab pipeline status失败: %s", e, exc_info=True)
         return jsonify({"code": 500, "msg": str(e)}), 500
 
 @app.route('/api/json', methods=['GET', 'POST'])
 def json_api():
-    if request.method == 'POST':
-        data = request.get_json()
-        headers = request.headers
+    if flask_request.method == 'POST':
+        data = flask_request.get_json()
+        headers = flask_request.headers
         if headers:
             logger.info("Received headers: %s", headers)
         logger.info("Received data: %s", data)
@@ -282,7 +287,7 @@ def create_alert_rule():
         data = flask_request.json
         
         # 参数验证
-        required_fields = ['group_id', 'users', 'alert_id', 'rank', 'alertmanager_url', 'project']
+        required_fields = ['group_id', 'users', 'alert_id', 'rank', 'project']
         for field in required_fields:
             if field not in data:
                 return jsonify({"code": 400, "msg": f"缺少必填字段: {field}"}), 400
@@ -297,8 +302,9 @@ def create_alert_rule():
         
         sql = """
             INSERT INTO alert_config 
-            (group_id, users, alert_id, `rank`, alertmanager_url, project, remark, label_rules)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (group_id, users, alert_id, `rank`, alertmanager_url, project, remark, label_rules,
+             template_type, silence_type, grafana_url)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
         values = (
@@ -306,10 +312,13 @@ def create_alert_rule():
             users_json,
             data['alert_id'],
             data['rank'],
-            data['alertmanager_url'],
+            data.get('alertmanager_url') or None,
             data['project'],
             data.get('remark'),
-            label_rules_json
+            label_rules_json,
+            data.get('template_type', 'ops'),
+            data.get('silence_type', 'alertmanager'),
+            data.get('grafana_url') or None
         )
         
         cursor.execute(sql, values)
@@ -374,6 +383,15 @@ def update_alert_rule(rule_id):
         if 'label_rules' in data:
             update_fields.append('label_rules = %s')
             values.append(json.dumps(data['label_rules']) if data['label_rules'] else None)
+        if 'template_type' in data:
+            update_fields.append('template_type = %s')
+            values.append(data['template_type'])
+        if 'silence_type' in data:
+            update_fields.append('silence_type = %s')
+            values.append(data['silence_type'])
+        if 'grafana_url' in data:
+            update_fields.append('grafana_url = %s')
+            values.append(data.get('grafana_url') or None)
         
         if not update_fields:
             return jsonify({"code": 400, "msg": "没有可更新的字段"}), 400
@@ -479,6 +497,6 @@ if __name__ == "__main__":
     logger.info("=" * 60)
 
     # 启动飞书 WebSocket 长连接（守护线程，自动重连）
-    start_ws_client_in_thread(config.APP_ID, config.APP_SECRET, feishu_client)
+    start_ws_client_in_thread(config.APP_ID, config.APP_SECRET, feishu_client, debug=config.DEBUG)
 
     app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)

@@ -11,30 +11,25 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
+
 def save_dbdata(post_data, project):
     json_data = [post_data]
 
-    # 获取UTC时间
     utc_now = datetime.datetime.now(pytz.utc)
     beijing_time = utc_now.astimezone(pytz.timezone('Asia/Shanghai'))
     iso_format = beijing_time.isoformat()
     startsAtTime = iso_format[:23] + "Z"
     random_number = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(20))
 
-    # 初始化一个空列表来存储所有的matchers
     matchers = []
+    fingerprints = []
 
-    # 遍历JSON数据中的alerts
     for alert_group in json_data:
         for alert in alert_group.get('alerts', []):
             if alert.get('status') == 'resolved':
                 continue
             labels = alert.get('labels', {})
-            # 为当前alert创建一个matchers对象
-            matchers_object = {
-                "matchers": []
-            }
-            # 将当前alert的labels转换为matchers格式并添加到当前alert的matchers对象中
+            matchers_object = {"matchers": []}
             for label_name, label_value in labels.items():
                 matchers_object["matchers"].append({
                     "name": label_name,
@@ -42,49 +37,91 @@ def save_dbdata(post_data, project):
                     "isRegex": False,
                     "isEqual": True
                 })
-            # 将当前alert的matchers对象添加到总的matchers列表中
             matchers.append(matchers_object)
+            fp = alert.get('fingerprint')
+            if fp and fp not in fingerprints:
+                fingerprints.append(fp)
 
     if not matchers:
         logger.info("没有告警的数据，不写入数据库")
         return None
 
-    output_mysql = {
-        "matchers": matchers
-    }
+    output_mysql = {"matchers": matchers}
     json_data_to_insert = json.dumps(output_mysql)
+    fingerprints_json = json.dumps(fingerprints)
+
+    connection = None
     try:
-        # 从config获取告警数据库配置
         db_config = config.get_alert_db_config()
         connection = mysql.connector.connect(**db_config)
 
         if connection.is_connected():
-            db_Info = connection.get_server_info()
-            logger.info(f"成功连接到MySQL数据库，版本：{db_Info}")
-
+            logger.info("成功连接到MySQL数据库")
             cursor = connection.cursor()
             insert_query = """
-                INSERT INTO alert_data (id, alertlabels, project, alerttime)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO alert_data (id, alertlabels, project, alerttime, fingerprints)
+                VALUES (%s, %s, %s, %s, %s)
             """
-
-            id_value = random_number
-
-            # 插入id和JSON数据
-            cursor.execute(insert_query, (id_value, json_data_to_insert, project, startsAtTime))
-
-            # 提交事务
+            cursor.execute(insert_query, (
+                random_number, json_data_to_insert, project, startsAtTime, fingerprints_json
+            ))
             connection.commit()
-            # print("数据插入成功。")
-            return id_value
+            return random_number
 
     except Error as e:
-        logger.error(f"连接或插入数据时出错：{e}")
-        return f"查询数据时出错：, {e}"
+        logger.error("连接或插入数据时出错：%s", e)
+        return None
 
     finally:
-        # 关闭游标和连接
-        if connection.is_connected():
+        if connection and connection.is_connected():
             cursor.close()
             connection.close()
-            # print("MySQL连接已关闭。")
+
+
+def update_message_id(maid: str, message_id: str) -> None:
+    """将飞书消息 ID 写入 alert_data，用于话题回复"""
+    if not maid or not message_id:
+        return
+    connection = None
+    try:
+        db_config = config.get_alert_db_config()
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor()
+        cursor.execute(
+            "UPDATE alert_data SET message_id = %s WHERE id = %s",
+            (message_id, maid)
+        )
+        connection.commit()
+        logger.debug("已将 message_id=%s 写入 maid=%s", message_id, maid)
+    except Error as e:
+        logger.error("更新 message_id 失败: %s", e)
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+
+def get_message_id_by_fingerprint(fingerprint: str) -> str:
+    """通过 fingerprint 查找对应告警的飞书消息 ID（取最新一条）"""
+    if not fingerprint:
+        return ''
+    connection = None
+    try:
+        db_config = config.get_alert_db_config()
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT message_id FROM alert_data "
+            "WHERE JSON_CONTAINS(fingerprints, %s) AND message_id IS NOT NULL "
+            "ORDER BY alerttime DESC LIMIT 1",
+            (json.dumps(fingerprint),)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else ''
+    except Error as e:
+        logger.error("查询 message_id 失败: %s", e)
+        return ''
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()

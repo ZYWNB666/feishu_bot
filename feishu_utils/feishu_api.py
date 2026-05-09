@@ -75,49 +75,44 @@ class FeishuApiClient:
         }
         
         # 发送请求
-        logger.info(f"发送消息: {receive_id_type}={receive_id}, msg_type={msg_type}")
+        logger.info("发送消息: %s=%s, msg_type=%s", receive_id_type, receive_id, msg_type)
         resp = requests.post(url=url, headers=headers, json=req_body, timeout=10)
         
         # 检查响应
         self._check_error_response(resp)
-        
-        logger.info("消息发送成功")
-        return resp.json()
+
+        resp_data = resp.json()
+        message_id = (resp_data.get('data') or {}).get('message_id', '')
+        logger.info("消息发送成功, message_id=%s", message_id)
+        return message_id
     
-    def reply_message(self, message_id, msg_type, content):
+    def reply_message(self, message_id, msg_type, content, reply_in_thread: bool = False):
         """
-        回复消息（引用回复）
-        
+        回复消息
+
         Args:
             message_id: 要回复的消息ID
             msg_type: 消息类型 (text, post, image, interactive等)
             content: 消息内容（JSON字符串格式）
+            reply_in_thread: True 时在消息话题中回复，而非引用回复
         """
-        # 获取access token
         self._authorize_tenant_access_token()
-        
-        # 构建请求URL
+
         url = f"{self._lark_host}{self.MESSAGE_URI}/{message_id}/reply"
-        
-        # 构建请求头
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.tenant_access_token}",
         }
-        
-        # 构建请求体
         req_body = {
             "content": content,
             "msg_type": msg_type,
+            "reply_in_thread": reply_in_thread,
         }
-        
-        # 发送请求
-        logger.info(f"回复消息: message_id={message_id}, msg_type={msg_type}")
+
+        logger.info("回复消息: message_id=%s, msg_type=%s, reply_in_thread=%s",
+                    message_id, msg_type, reply_in_thread)
         resp = requests.post(url=url, headers=headers, json=req_body, timeout=10)
-        
-        # 检查响应
         self._check_error_response(resp)
-        
         logger.info("消息回复成功")
         return resp.json()
     
@@ -153,7 +148,7 @@ class FeishuApiClient:
             FeishuApiException: 当响应包含错误时
         """
         if resp.status_code != 200:
-            logger.error(f"HTTP请求失败: {resp.status_code} - {resp.text}")
+            logger.error("HTTP请求失败: %s - %s", resp.status_code, resp.text)
             resp.raise_for_status()
         
         response_dict = resp.json()
@@ -161,7 +156,7 @@ class FeishuApiClient:
         
         if code != 0:
             msg = response_dict.get("msg", "未知错误")
-            logger.error(f"飞书API错误: code={code}, msg={msg}")
+            logger.error("飞书API错误: code=%s, msg=%s", code, msg)
             raise FeishuApiException(code=code, msg=msg)
 
 

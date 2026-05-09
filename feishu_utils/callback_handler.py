@@ -9,8 +9,10 @@ import threading
 import time
 from datetime import datetime
 import pytz
+import mysql.connector
 
 from alerts_format.ma import macreate, madelete
+from alerts_format.grafana_silence import grafana_create_silence, grafana_delete_silence
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,44 @@ def _get_current_time():
     return now.strftime('%Y-%m-%d %H:%M:%S')
 
 
-def create_silence_success_card(maid, duration):
+def _get_silence_config_by_maid(maid: str) -> dict:
+    """
+    通过 maid 查找对应的 silence_type 和 grafana_url
+    先从 alert_data 查 project，再从 alert_config 查路由配置
+    """
+    from config import config
+    connection = None
+    try:
+        db_config = config.get_alert_db_config()
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT project FROM alert_data WHERE id = %s", (maid,))
+        row = cursor.fetchone()
+        if not row or not row.get('project'):
+            return {}
+        project = row['project']
+        cursor.close()
+
+        # 查 alert_config
+        cfg_conn = mysql.connector.connect(**config.get_config_db_config())
+        cfg_cursor = cfg_conn.cursor(dictionary=True)
+        cfg_cursor.execute(
+            "SELECT silence_type, grafana_url FROM alert_config WHERE project = %s LIMIT 1",
+            (project,)
+        )
+        cfg_row = cfg_cursor.fetchone()
+        cfg_cursor.close()
+        cfg_conn.close()
+        return cfg_row or {}
+    except Exception as e:
+        logger.error("查询 silence_config 失败: %s", e)
+        return {}
+    finally:
+        if connection and connection.is_connected():
+            connection.close()
+
+
+def create_silence_success_card(maid, duration, operator_id=None):
     """
     创建静默成功的卡片
     
@@ -73,6 +112,10 @@ def create_silence_success_card(maid, duration):
                     {
                         "tag": "plain_text",
                         "content": f"⏰ 操作时间: {_get_current_time()}"
+                    },
+                    {
+                        "tag": "lark_md",
+                        "content": f"👤 操作人: <at id=\"{operator_id}\"></at>" if operator_id else ""
                     }
                 ]
             },
@@ -86,10 +129,10 @@ def create_silence_success_card(maid, duration):
                             "content": "🔔 取消静默"
                         },
                         "type": "danger",
-                        "value": json.dumps({
+                        "value": {
                             "action": "cancel_silence",
                             "maid": maid
-                        })
+                        }
                     }
                 ]
             }
@@ -99,7 +142,7 @@ def create_silence_success_card(maid, duration):
     return card_data
 
 
-def create_cancel_silence_card(maid):
+def create_cancel_silence_card(maid, operator_id=None):
     """
     创建取消静默成功的卡片
     
@@ -137,6 +180,10 @@ def create_cancel_silence_card(maid):
                     {
                         "tag": "plain_text",
                         "content": f"⏰ 操作时间: {_get_current_time()}"
+                    },
+                    {
+                        "tag": "lark_md",
+                        "content": f"👤 操作人: <at id=\"{operator_id}\"></at>" if operator_id else ""
                     }
                 ]
             }
@@ -160,9 +207,9 @@ def create_failure_card(maid, action_type="静默", error_message=None):
     """
     # 构建错误详情
     if error_message:
-        content = f"**告警 {maid} {action_type}操作失败**\n\n❌ 错误信息: {error_message}\n\n💡 请检查以下配置：\n- Alertmanager URL 是否正确\n- Alertmanager 服务是否正常运行\n- 网络连接是否正常"
+        content = f"**告警 {maid} {action_type}操作失败**\n\n❌ 错误信息: {error_message}\n\n💡 请检查以下配置：\n- Grafana API Key 是否有效（GRAFANA_API_KEY）\n- Grafana 地址是否正确（grafana_url）\n- Grafana Alertmanager 是否启用\n- 网络连接是否正常"
     else:
-        content = f"**告警 {maid} {action_type}操作失败**\n\n💡 请检查以下配置：\n- Alertmanager URL 是否正确\n- Alertmanager 服务是否正常运行\n- 网络连接是否正常"
+        content = f"**告警 {maid} {action_type}操作失败**\n\n💡 请检查以下配置：\n- Grafana API Key 是否有效（GRAFANA_API_KEY）\n- Grafana 地址是否正确（grafana_url）\n- Grafana Alertmanager 是否启用\n- 网络连接是否正常"
     
     card_data = {
         "config": {
@@ -201,105 +248,120 @@ def create_failure_card(maid, action_type="静默", error_message=None):
     return card_data
 
 
-def handle_silence_action(maid, duration, open_message_id, feishu_client):
+def handle_silence_action(maid, duration, open_message_id, feishu_client, operator_id=None):
     """
     处理静默操作（异步执行）
-    
+
     Args:
         maid: 告警ID
         duration: 静默时长（秒）
-        open_message_id: 消息ID
+        open_message_id: 消息ID（用于话题回复）
         feishu_client: 飞书客户端实例
     """
     def process_silence():
         try:
             duration_hours = duration // 3600
-            silence_result = macreate(maid, duration_hours)
-            
+
+            # 查询 silence_type
+            silence_cfg = _get_silence_config_by_maid(maid)
+            silence_type = silence_cfg.get('silence_type', 'grafana')
+
+            if silence_type == 'grafana':
+                grafana_url = silence_cfg.get('grafana_url', '')
+                silence_result = grafana_create_silence(maid, duration_hours, grafana_url)
+            else:
+                silence_result = macreate(maid, duration_hours)
+
             if silence_result.get('success'):
-                # 成功：发送成功卡片
-                silence_card = create_silence_success_card(maid, duration)
+                silence_card = create_silence_success_card(maid, duration, operator_id)
                 feishu_client.reply_message(
                     open_message_id,
                     "interactive",
-                    json.dumps(silence_card)
+                    json.dumps(silence_card),
+                    reply_in_thread=True,
                 )
-                logger.info("静默操作完成")
+                logger.info("静默操作完成（%s）", silence_type)
             else:
-                # 失败：发送失败卡片
                 error_msg = silence_result.get('message', '未知错误')
                 failure_card = create_failure_card(maid, "静默", error_msg)
                 feishu_client.reply_message(
                     open_message_id,
                     "interactive",
-                    json.dumps(failure_card)
+                    json.dumps(failure_card),
+                    reply_in_thread=True,
                 )
                 logger.error("静默创建失败")
         except Exception as e:
-            # 异常：发送失败卡片
             failure_card = create_failure_card(maid, "静默", str(e))
             try:
                 feishu_client.reply_message(
                     open_message_id,
                     "interactive",
-                    json.dumps(failure_card)
+                    json.dumps(failure_card),
+                    reply_in_thread=True,
                 )
-            except:
+            except Exception:
                 pass
-            logger.error("处理静默时出错: %s", str(e))
-    
-    # 启动后台线程
+            logger.error("处理静默时出错: %s", e)
+
     thread = threading.Thread(target=process_silence)
     thread.daemon = True
     thread.start()
 
 
-def handle_cancel_silence_action(maid, open_message_id, feishu_client):
+def handle_cancel_silence_action(maid, open_message_id, feishu_client, operator_id=None):
     """
     处理取消静默操作（异步执行）
-    
+
     Args:
         maid: 告警ID
-        open_message_id: 消息ID
+        open_message_id: 消息ID（用于话题回复）
         feishu_client: 飞书客户端实例
     """
     def process_cancel_silence():
         try:
-            delete_result = madelete(maid)
-            
+            # 查询 silence_type
+            silence_cfg = _get_silence_config_by_maid(maid)
+            silence_type = silence_cfg.get('silence_type', 'grafana')
+
+            if silence_type == 'grafana':
+                grafana_url = silence_cfg.get('grafana_url', '')
+                delete_result = grafana_delete_silence(maid, grafana_url)
+            else:
+                delete_result = madelete(maid)
+
             if delete_result.get('success'):
-                # 成功：发送成功卡片
-                cancel_card = create_cancel_silence_card(maid)
+                cancel_card = create_cancel_silence_card(maid, operator_id)
                 feishu_client.reply_message(
                     open_message_id,
                     "interactive",
-                    json.dumps(cancel_card)
+                    json.dumps(cancel_card),
+                    reply_in_thread=True,
                 )
-                logger.info("取消静默操作完成")
+                logger.info("取消静默操作完成（%s）", silence_type)
             else:
-                # 失败：发送失败卡片
                 error_msg = delete_result.get('message', '未知错误')
                 failure_card = create_failure_card(maid, "取消静默", error_msg)
                 feishu_client.reply_message(
                     open_message_id,
                     "interactive",
-                    json.dumps(failure_card)
+                    json.dumps(failure_card),
+                    reply_in_thread=True,
                 )
                 logger.error("取消静默失败")
         except Exception as e:
-            # 异常：发送失败卡片
             failure_card = create_failure_card(maid, "取消静默", str(e))
             try:
                 feishu_client.reply_message(
                     open_message_id,
                     "interactive",
-                    json.dumps(failure_card)
+                    json.dumps(failure_card),
+                    reply_in_thread=True,
                 )
-            except:
+            except Exception:
                 pass
-            logger.error("处理取消静默时出错: %s", str(e))
-    
-    # 启动后台线程
+            logger.error("处理取消静默时出错: %s", e)
+
     thread = threading.Thread(target=process_cancel_silence)
     thread.daemon = True
     thread.start()
@@ -334,17 +396,18 @@ def parse_callback_data(data):
         open_message_id = data.get("open_message_id")
         open_id = data.get("open_id")
     
-    action_value_str = action.get("value", "{}")
+    action_value_raw = action.get("value", {})
     
-    # 解析 JSON 字符串（可能需要解析两次，因为飞书会双重转义）
+    # SDK 传来的 value 可能是 dict（新版）或 JSON 字符串（旧版/双重转义）
     try:
-        if isinstance(action_value_str, str):
-            action_value = json.loads(action_value_str)
-            # 如果解析后还是字符串，再解析一次
+        if isinstance(action_value_raw, dict):
+            action_value = action_value_raw
+        elif isinstance(action_value_raw, str):
+            action_value = json.loads(action_value_raw)
             if isinstance(action_value, str):
                 action_value = json.loads(action_value)
         else:
-            action_value = action_value_str
+            action_value = {}
     except json.JSONDecodeError:
         logger.error("解析回调数据失败")
         return None, None, None, None
@@ -423,7 +486,7 @@ def process_card_callback(data, feishu_client):
             duration = action_value.get("duration", 7200)
             
             logger.info("执行静默操作")
-            handle_silence_action(maid, duration, open_message_id, feishu_client)
+            handle_silence_action(maid, duration, open_message_id, feishu_client, open_id)
             return {}
         
         # 处理取消静默操作
@@ -431,7 +494,7 @@ def process_card_callback(data, feishu_client):
             maid = action_value.get("maid")
             
             logger.info("执行取消静默操作")
-            handle_cancel_silence_action(maid, open_message_id, feishu_client)
+            handle_cancel_silence_action(maid, open_message_id, feishu_client, open_id)
             return {}
         
         # 未知操作

@@ -11,13 +11,18 @@ from alerts_format.alert_json_format import (
     extract_all_labels,
     extract_alertids,
     extract_alertname,
-    alert_data_api
+    extract_alert_raw,
+    extract_grafana_urls,
+    extract_fingerprints,
+    alert_data_api,
 )
 from alerts_format.db_utils import (
     get_alert_config_by_labels,
     get_alert_config_by_alertid
 )
+from alerts_format.savedb import update_message_id, get_message_id_by_fingerprint
 from feishu_utils.event_handler import alert_to_feishu
+from feishu_utils.alert_card_biz import build_biz_firing_card, build_biz_resolved_card
 
 logger = logging.getLogger(__name__)
 
@@ -179,64 +184,136 @@ def _find_alert_configs(data):
 def _process_single_alert_config(data, config_row, alertname, feishu_client):
     """
     处理单个告警配置
-    
+
     Args:
         data: 告警数据
         config_row: 配置行
         alertname: 告警名称
         feishu_client: 飞书客户端实例
-    
+
     Returns:
         dict: 处理结果
     """
-    # 处理告警格式配置
-    alerts, severities, maid = alert_data_api(
-        data, 
-        config_row.get('project'), 
-        config_row.get('alertmanager_url')
+    # 解包 4-tuple（新签名）
+    alerts, severities, maid, grafana_urls = alert_data_api(
+        data,
+        config_row.get('project'),
+        config_row.get('alertmanager_url'),
     )
-    
-    # 检查是否符合@条件
-    rank = config_row['rank']
+
+    # 判断是否符合 @ 条件
+    rank = config_row.get('rank', '')
     severity_matches = any(
-        severity in [str(r) for r in rank.split(',')] 
+        severity in [str(r) for r in rank.split(',')]
         for severity in severities
     )
-    
     if severity_matches:
-        mentioned_user_list = json.loads(config_row['users']) if config_row['users'] else []
+        mentioned_user_list = json.loads(config_row['users']) if config_row.get('users') else []
         logger.info("符合@条件的告警级别%s | 此告警的级别 %s", rank, severities)
     else:
         mentioned_user_list = []
-    
-    # 构建告警信息（使用join统一处理换行）
-    string_alert_info = _build_alert_message(alerts)
-    
+
     # 确定告警级别
     alert_severity = _determine_alert_severity(severities)
-    
-    # 发送到对应的群组
-    status_code = alert_to_feishu(
-        feishu_client, 
-        string_alert_info, 
-        mentioned_user_list, 
-        config_row['group_id'],
-        alertname=alertname,
-        severity=alert_severity,
-        maid=maid
-    )
-    
-    if status_code >= 200 and status_code < 300:
-        logger.info("✅ 发送告警信息成功，群组: %s，级别: %s", config_row['group_id'], alert_severity)
+
+    # 判断模板类型（默认 ops）
+    template_type = config_row.get('template_type', 'ops')
+    group_id = config_row['group_id']
+    grafana_url_cfg = config_row.get('grafana_url') or ''
+
+    # 判断是否为 resolved 告警（所有 alert 都是 resolved）
+    all_alerts = data.get('alerts', [])
+    is_resolved = all_alerts and all(a.get('status') == 'resolved' for a in all_alerts)
+
+    # ---------- resolved 告警：尝试在话题中回复 ----------
+    if is_resolved:
+        fingerprints = extract_fingerprints(data)
+        thread_message_id = ''
+        for fp in fingerprints:
+            mid = get_message_id_by_fingerprint(fp)
+            if mid:
+                thread_message_id = mid
+                break
+
+        if template_type == 'biz':
+            raw_alerts = extract_alert_raw(data)
+            common_labels = data.get('commonLabels', {})
+            content = build_biz_resolved_card(alertname, raw_alerts, grafana_urls, common_labels)
+        else:
+            string_alert_info = _build_alert_message(alerts)
+            content = _build_ops_resolved_content(string_alert_info, alertname)
+
+        if thread_message_id:
+            try:
+                feishu_client.reply_message(thread_message_id, 'interactive', content, reply_in_thread=True)
+                logger.info("✅ 已在话题中回复恢复通知，原消息: %s", thread_message_id)
+                return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': True}
+            except Exception as e:
+                logger.warning("话题回复失败，降级为新消息: %s", e)
+
+        # 无 thread_message_id 或回复失败时，发新消息
+        message_id = feishu_client.send("chat_id", group_id, "interactive", content)
+        logger.info("✅ 发送恢复通知（新消息）group_id=%s message_id=%s", group_id, message_id)
+        return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': bool(message_id)}
+
+    # ---------- firing 告警 ----------
+    if template_type == 'biz':
+        raw_alerts = extract_alert_raw(data)
+        common_labels = data.get('commonLabels', {})
+        content = build_biz_firing_card(
+            alertname, alert_severity, raw_alerts, grafana_urls, maid, common_labels, mentioned_user_list
+        )
+        try:
+            message_id = feishu_client.send("chat_id", group_id, "interactive", content)
+        except Exception as e:
+            logger.error("biz 卡片发送失败: %s", e)
+            message_id = ''
+    else:
+        # ops 模板走原有 alert_to_feishu
+        string_alert_info = _build_alert_message(alerts)
+        message_id = alert_to_feishu(
+            feishu_client,
+            string_alert_info,
+            mentioned_user_list,
+            group_id,
+            alertname=alertname,
+            severity=alert_severity,
+            maid=maid,
+        )
+
+    if message_id:
+        # 保存 message_id 供后续 resolved/静默话题回复
+        if maid:
+            update_message_id(maid, message_id)
+        logger.info("✅ 发送告警信息成功，群组: %s，级别: %s", group_id, alert_severity)
         return {
-            'alert_id': config_row['alert_id'],
-            'group_id': config_row['group_id'],
-            'status_code': status_code,
-            'success': True
+            'alert_id': config_row.get('alert_id'),
+            'group_id': group_id,
+            'message_id': message_id,
+            'success': True,
         }
     else:
-        logger.error("❌ 发送告警信息失败，状态码: %d", status_code)
+        logger.error("❌ 发送告警信息失败，群组: %s", group_id)
         return None
+
+
+def _build_ops_resolved_content(string_alert_info: str, alertname: str) -> str:
+    """将 ops 格式告警信息包装成绿色恢复卡片 JSON"""
+    import json as _json
+    from feishu_utils.event_handler import _get_current_time
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"✅ {alertname} 已恢复"},
+            "template": "green",
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": string_alert_info}},
+            {"tag": "hr"},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": f"⏰ 发送时间: {_get_current_time()}"}]},
+        ],
+    }
+    return _json.dumps(card, ensure_ascii=False)
 
 
 def _build_alert_message(alerts):

@@ -467,6 +467,7 @@
                         <th>通知人员</th>
                         <th>告警级别</th>
                         <th>标签规则</th>
+                        <th>模板/静默</th>
                         <th>备注</th>
                         <th>操作</th>
                     </tr>
@@ -536,10 +537,35 @@
                 </div>
 
                 <div class="form-group">
-                    <label>Alertmanager地址 <span class="required">*</span></label>
-                    <input type="url" id="alertmanager_url" name="alertmanager_url" required 
+                    <label>Alertmanager地址</label>
+                    <input type="url" id="alertmanager_url" name="alertmanager_url"
                            placeholder="例如: http://alertmanager:9093">
-                    <small>Alertmanager服务地址</small>
+                    <small>静默类型为 alertmanager 时填写</small>
+                </div>
+
+                <div class="form-group">
+                    <label>告警模板 <span class="required">*</span></label>
+                    <select id="template_type" name="template_type">
+                        <option value="ops">ops - 运维模板（Alertmanager 格式）</option>
+                        <option value="biz">biz - 业务模板（Grafana 格式，含面板链接）</option>
+                    </select>
+                    <small>ops 适合 Alertmanager 告警源；biz 适合 Grafana Alerting 告警源</small>
+                </div>
+
+                <div class="form-group">
+                    <label>静默类型 <span class="required">*</span></label>
+                    <select id="silence_type" name="silence_type" onchange="onSilenceTypeChange()">
+                        <option value="alertmanager">alertmanager - 通过 Alertmanager 创建静默</option>
+                        <option value="grafana">grafana - 通过 Grafana API 创建静默</option>
+                    </select>
+                    <small>决定点击"静默"按钮后调用哪个 API</small>
+                </div>
+
+                <div class="form-group" id="grafanaUrlGroup" style="display:none;">
+                    <label>Grafana 地址 <span class="required">*</span></label>
+                    <input type="url" id="grafana_url" name="grafana_url"
+                           placeholder="例如: https://grafana.example.com">
+                    <small>静默类型为 grafana 时填写，需同步配置 GRAFANA_API_KEY 环境变量</small>
                 </div>
 
                 <div class="form-group">
@@ -689,6 +715,10 @@
                         }).join(' ')}
                     </td>
                     <td>${labelRulesDisplay}</td>
+                    <td>
+                        <span class="badge ${rule.template_type === 'biz' ? 'badge-info' : 'badge-warning'}">${rule.template_type || 'ops'}</span>
+                        <span class="badge ${rule.silence_type === 'grafana' ? 'badge-info' : 'badge-critical'}">${rule.silence_type || 'alertmanager'}</span>
+                    </td>
                     <td>${rule.remark || '-'}</td>
                     <td class="actions">
                         <button class="btn btn-secondary btn-icon" onclick="editRule(${rule.id})">编辑</button>
@@ -730,7 +760,15 @@
             editingRuleId = null;
             labelRuleCounter = 0;
             document.getElementById('labelRulesList').innerHTML = '';
+            document.getElementById('grafanaUrlGroup').style.display = 'none';
             renderUserTags();
+        }
+
+        // silence_type 联动显示/隐藏 grafana_url
+        function onSilenceTypeChange() {
+            const silenceType = document.getElementById('silence_type').value;
+            const grafanaGroup = document.getElementById('grafanaUrlGroup');
+            grafanaGroup.style.display = silenceType === 'grafana' ? 'block' : 'none';
         }
 
         // 生成Alert ID（9位大写字母和数字）
@@ -876,7 +914,10 @@
                 group_id: document.getElementById('group_id').value,
                 users: currentUsers,
                 rank: document.getElementById('rank').value,
-                alertmanager_url: document.getElementById('alertmanager_url').value,
+                alertmanager_url: document.getElementById('alertmanager_url').value || null,
+                template_type: document.getElementById('template_type').value,
+                silence_type: document.getElementById('silence_type').value,
+                grafana_url: document.getElementById('grafana_url').value || null,
                 remark: document.getElementById('remark').value || null,
                 label_rules: getLabelRules()
             };
@@ -929,7 +970,11 @@
                         document.getElementById('project').value = rule.project;
                         document.getElementById('group_id').value = rule.group_id;
                         document.getElementById('rank').value = rule.rank;
-                        document.getElementById('alertmanager_url').value = rule.alertmanager_url;
+                        document.getElementById('alertmanager_url').value = rule.alertmanager_url || '';
+                        document.getElementById('template_type').value = rule.template_type || 'ops';
+                        document.getElementById('silence_type').value = rule.silence_type || 'alertmanager';
+                        document.getElementById('grafana_url').value = rule.grafana_url || '';
+                        onSilenceTypeChange();
                         document.getElementById('remark').value = rule.remark || '';
                         
                         // 填充users

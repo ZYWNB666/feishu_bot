@@ -1,0 +1,661 @@
+#!/usr/bin/env python3
+"""
+模拟 Grafana 告警发送测试脚本
+向 /api/json 接口发送模拟的 Grafana 告警数据
+支持 firing / resolved 两种状态切换
+"""
+
+import json
+import time
+import requests
+import argparse
+
+# 目标地址，根据实际部署修改
+BASE_URL = "http://127.0.0.1:3100"
+API_PATH = "/api/v1/alerts"
+
+
+def build_grafana_alert_payload(status: str = "firing"):
+    """
+    构建模拟的 Grafana 告警 payload
+
+    Args:
+        status: 告警状态，"firing" 或 "resolved"
+    """
+    if status == "resolved":
+        return _build_resolved_payload()
+    return _build_firing_payload()
+
+
+def _build_firing_payload():
+    """构建 firing 状态的告警 payload"""
+    payload = {
+        "receiver": "test_json",
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.0.14:10250",
+                    "namespace": "victoriametrics",
+                    "node": "hgx-014",
+                    "pod": "victoria-logs-victoria-logs-cluster-vlstorage-1",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-1 Memory usage is above 90% (current value is: 81.39)",
+                    "summary": "Pod victoria-logs-victoria-logs-cluster-vlstorage-1 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "26ae50f874bde0f7",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.14%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-014&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-1&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": {"A": 81.38675689697266},
+                "valueString": "[ var='A' labels={instance=10.0.0.14:10250, namespace=victoriametrics, node=hgx-014, pod=victoria-logs-victoria-logs-cluster-vlstorage-1} value=81.38675689697266 ]",
+            },
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "container": "vlstorage",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.0.14:10250",
+                    "namespace": "victoriametrics",
+                    "node": "hgx-014",
+                    "pod": "victoria-logs-victoria-logs-cluster-vlstorage-1",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-1 Memory usage is above 90% (current value is: 81.39)",
+                    "summary": "Pod victoria-logs-victoria-logs-cluster-vlstorage-1 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "836f8341cd9c3b43",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dvlstorage&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.14%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-014&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-1&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": {"A": 81.39126300811768},
+                "valueString": "[ var='A' labels={container=vlstorage, instance=10.0.0.14:10250, namespace=victoriametrics, node=hgx-014, pod=victoria-logs-victoria-logs-cluster-vlstorage-1} value=81.39126300811768 ]",
+            },
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "container": "registry",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.0.44:10250",
+                    "namespace": "harbor",
+                    "node": "hgx-044",
+                    "pod": "harbor-registry-58f698c8b4-rkhsh",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: harbor/harbor-registry-58f698c8b4-rkhsh Memory usage is above 90% (current value is: 69.45)",
+                    "summary": "Pod harbor-registry-58f698c8b4-rkhsh High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "832773d51eb80122",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dregistry&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.44%3A10250&matcher=namespace%3Dharbor&matcher=node%3Dhgx-044&matcher=pod%3Dharbor-registry-58f698c8b4-rkhsh&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": {"A": 69.45136388142905},
+                "valueString": "[ var='A' labels={container=registry, instance=10.0.0.44:10250, namespace=harbor, node=hgx-044, pod=harbor-registry-58f698c8b4-rkhsh} value=69.45136388142905 ]",
+            },
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.1.35:10250",
+                    "namespace": "victoriametrics",
+                    "node": "hgx-083",
+                    "pod": "victoria-logs-victoria-logs-cluster-vlstorage-0",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-0 Memory usage is above 90% (current value is: 75.92)",
+                    "summary": "Pod victoria-logs-victoria-logs-cluster-vlstorage-0 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "e867da1c549a3dc2",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.35%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-083&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-0&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": {"A": 75.91763734817505},
+                "valueString": "[ var='A' labels={instance=10.0.1.35:10250, namespace=victoriametrics, node=hgx-083, pod=victoria-logs-victoria-logs-cluster-vlstorage-0} value=75.91763734817505 ]",
+            },
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "container": "vlstorage",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.1.35:10250",
+                    "namespace": "victoriametrics",
+                    "node": "hgx-083",
+                    "pod": "victoria-logs-victoria-logs-cluster-vlstorage-0",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-0 Memory usage is above 90% (current value is: 75.91)",
+                    "summary": "Pod victoria-logs-victoria-logs-cluster-vlstorage-0 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "f9bc9995840676d6",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dvlstorage&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.35%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-083&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-0&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": {"A": 75.91085433959961},
+                "valueString": "[ var='A' labels={container=vlstorage, instance=10.0.1.35:10250, namespace=victoriametrics, node=hgx-083, pod=victoria-logs-victoria-logs-cluster-vlstorage-0} value=75.91085433959961 ]",
+            },
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.1.42:10250",
+                    "namespace": "monitoring",
+                    "node": "hgx-090",
+                    "pod": "prometheus-kube-prometheus-prometheus-0",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: monitoring/prometheus-kube-prometheus-prometheus-0 Memory usage is above 90% (current value is: 71.01)",
+                    "summary": "Pod prometheus-kube-prometheus-prometheus-0 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "f3a3342186221d30",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.42%3A10250&matcher=namespace%3Dmonitoring&matcher=node%3Dhgx-090&matcher=pod%3Dprometheus-kube-prometheus-prometheus-0&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": {"A": 71.00902610610032},
+                "valueString": "[ var='A' labels={instance=10.0.1.42:10250, namespace=monitoring, node=hgx-090, pod=prometheus-kube-prometheus-prometheus-0} value=71.00902610610032 ]",
+            },
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "container": "prometheus",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.1.42:10250",
+                    "namespace": "monitoring",
+                    "node": "hgx-090",
+                    "pod": "prometheus-kube-prometheus-prometheus-0",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: monitoring/prometheus-kube-prometheus-prometheus-0 Memory usage is above 90% (current value is: 71.06)",
+                    "summary": "Pod prometheus-kube-prometheus-prometheus-0 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "a8bdf7449752ec4f",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dprometheus&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.42%3A10250&matcher=namespace%3Dmonitoring&matcher=node%3Dhgx-090&matcher=pod%3Dprometheus-kube-prometheus-prometheus-0&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": {"A": 71.05793952941895},
+                "valueString": "[ var='A' labels={container=prometheus, instance=10.0.1.42:10250, namespace=monitoring, node=hgx-090, pod=prometheus-kube-prometheus-prometheus-0} value=71.05793952941895 ]",
+            },
+        ],
+        "groupLabels": {
+            "alertname": "PodMemoryUsage>95%",
+            "grafana_folder": "Alert rules",
+        },
+        "commonLabels": {
+            "alertname": "PodMemoryUsage>95%",
+            "grafana_folder": "Alert rules",
+            "severity": "critical",
+        },
+        "commonAnnotations": {},
+        "externalURL": "https://grafana-yunqiao.magikcloud.cn/",
+        "version": "1",
+        "groupKey": '{}/{__grafana_autogenerated__="true"}/{__grafana_receiver__="test_json"}:{alertname="PodMemoryUsage>95%", grafana_folder="Alert rules"}',
+        "truncatedAlerts": 0,
+        "orgId": 1,
+        "title": "[FIRING:7] PodMemoryUsage>95% Alert rules (critical)",
+        "state": "alerting",
+        "message": (
+            "**Firing**\n\n"
+            "Value: A=81.38675689697266\n"
+            "Labels:\n"
+            " - alertname = PodMemoryUsage>95%\n"
+            " - grafana_folder = Alert rules\n"
+            " - instance = 10.0.0.14:10250\n"
+            " - namespace = victoriametrics\n"
+            " - node = hgx-014\n"
+            " - pod = victoria-logs-victoria-logs-cluster-vlstorage-1\n"
+            " - severity = critical\n"
+            "Annotations:\n"
+            " - description = Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-1 Memory usage is above 90% (current value is: 81.39)\n"
+            " - summary = Pod victoria-logs-victoria-logs-cluster-vlstorage-1 High Memory usage detected\n"
+            "Source: https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1\n"
+            "Silence: https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.14%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-014&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-1&matcher=severity%3Dcritical&orgId=1\n"
+            "Dashboard: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1\n"
+            "Panel: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11\n\n"
+            "Value: A=69.45136388142905\n"
+            "Labels:\n"
+            " - alertname = PodMemoryUsage>95%\n"
+            " - container = registry\n"
+            " - grafana_folder = Alert rules\n"
+            " - instance = 10.0.0.44:10250\n"
+            " - namespace = harbor\n"
+            " - node = hgx-044\n"
+            " - pod = harbor-registry-58f698c8b4-rkhsh\n"
+            " - severity = critical\n"
+            "Annotations:\n"
+            " - description = Pod: harbor/harbor-registry-58f698c8b4-rkhsh Memory usage is above 90% (current value is: 69.45)\n"
+            " - summary = Pod harbor-registry-58f698c8b4-rkhsh High Memory usage detected\n"
+            "Source: https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1\n"
+            "Silence: https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dregistry&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.44%3A10250&matcher=namespace%3Dharbor&matcher=node%3Dhgx-044&matcher=pod%3Dharbor-registry-58f698c8b4-rkhsh&matcher=severity%3Dcritical&orgId=1\n"
+            "Dashboard: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1\n"
+            "Panel: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11\n\n"
+            "Value: A=75.91763734817505\n"
+            "Labels:\n"
+            " - alertname = PodMemoryUsage>95%\n"
+            " - grafana_folder = Alert rules\n"
+            " - instance = 10.0.1.35:10250\n"
+            " - namespace = victoriametrics\n"
+            " - node = hgx-083\n"
+            " - pod = victoria-logs-victoria-logs-cluster-vlstorage-0\n"
+            " - severity = critical\n"
+            "Annotations:\n"
+            " - description = Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-0 Memory usage is above 90% (current value is: 75.92)\n"
+            " - summary = Pod victoria-logs-victoria-logs-cluster-vlstorage-0 High Memory usage detected\n"
+            "Source: https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1\n"
+            "Silence: https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.35%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-083&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-0&matcher=severity%3Dcritical&orgId=1\n"
+            "Dashboard: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1\n"
+            "Panel: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11\n\n"
+            "Value: A=71.00902610610032\n"
+            "Labels:\n"
+            " - alertname = PodMemoryUsage>95%\n"
+            " - grafana_folder = Alert rules\n"
+            " - instance = 10.0.1.42:10250\n"
+            " - namespace = monitoring\n"
+            " - node = hgx-090\n"
+            " - pod = prometheus-kube-prometheus-prometheus-0\n"
+            " - severity = critical\n"
+            "Annotations:\n"
+            " - description = Pod: monitoring/prometheus-kube-prometheus-prometheus-0 Memory usage is above 90% (current value is: 71.01)\n"
+            " - summary = Pod prometheus-kube-prometheus-prometheus-0 High Memory usage detected\n"
+            "Source: https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1\n"
+            "Silence: https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.42%3A10250&matcher=namespace%3Dmonitoring&matcher=node%3Dhgx-090&matcher=pod%3Dprometheus-kube-prometheus-prometheus-0&matcher=severity%3Dcritical&orgId=1\n"
+            "Dashboard: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1\n"
+            "Panel: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11"
+        ),
+    }
+    return payload
+
+
+def _build_resolved_payload():
+    """构建 resolved 状态的告警 payload"""
+    payload = {
+        "receiver": "test_json",
+        "status": "resolved",
+        "alerts": [
+            {
+                "status": "resolved",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.0.14:10250",
+                    "namespace": "victoriametrics",
+                    "node": "hgx-014",
+                    "pod": "victoria-logs-victoria-logs-cluster-vlstorage-1",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-1 Memory usage is above 90% (current value is: 79.38)",
+                    "grafana_state_reason": "Updated",
+                    "summary": "Pod victoria-logs-victoria-logs-cluster-vlstorage-1 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "2026-05-09T06:58:20.025587481Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "26ae50f874bde0f7",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.14%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-014&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-1&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": None,
+                "valueString": "[ var='A' labels={instance=10.0.0.14:10250, namespace=victoriametrics, node=hgx-014, pod=victoria-logs-victoria-logs-cluster-vlstorage-1} value=79.38247919082642 ]",
+            },
+            {
+                "status": "resolved",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "container": "vlstorage",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.0.14:10250",
+                    "namespace": "victoriametrics",
+                    "node": "hgx-014",
+                    "pod": "victoria-logs-victoria-logs-cluster-vlstorage-1",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-1 Memory usage is above 90% (current value is: 79.42)",
+                    "grafana_state_reason": "Updated",
+                    "summary": "Pod victoria-logs-victoria-logs-cluster-vlstorage-1 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "2026-05-09T06:58:20.025587481Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "836f8341cd9c3b43",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dvlstorage&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.14%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-014&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-1&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": None,
+                "valueString": "[ var='A' labels={container=vlstorage, instance=10.0.0.14:10250, namespace=victoriametrics, node=hgx-014, pod=victoria-logs-victoria-logs-cluster-vlstorage-1} value=79.41972017288208 ]",
+            },
+            {
+                "status": "resolved",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "container": "registry",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.0.44:10250",
+                    "namespace": "harbor",
+                    "node": "hgx-044",
+                    "pod": "harbor-registry-58f698c8b4-rkhsh",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: harbor/harbor-registry-58f698c8b4-rkhsh Memory usage is above 90% (current value is: 66.19)",
+                    "grafana_state_reason": "Updated",
+                    "summary": "Pod harbor-registry-58f698c8b4-rkhsh High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "2026-05-09T06:58:20.025587481Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "832773d51eb80122",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dregistry&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.44%3A10250&matcher=namespace%3Dharbor&matcher=node%3Dhgx-044&matcher=pod%3Dharbor-registry-58f698c8b4-rkhsh&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": None,
+                "valueString": "[ var='A' labels={container=registry, instance=10.0.0.44:10250, namespace=harbor, node=hgx-044, pod=harbor-registry-58f698c8b4-rkhsh} value=66.19307200113931 ]",
+            },
+            {
+                "status": "resolved",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.1.35:10250",
+                    "namespace": "victoriametrics",
+                    "node": "hgx-083",
+                    "pod": "victoria-logs-victoria-logs-cluster-vlstorage-0",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-0 Memory usage is above 90% (current value is: 80.84)",
+                    "grafana_state_reason": "Updated",
+                    "summary": "Pod victoria-logs-victoria-logs-cluster-vlstorage-0 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "2026-05-09T06:58:20.025587481Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "e867da1c549a3dc2",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.35%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-083&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-0&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": None,
+                "valueString": "[ var='A' labels={instance=10.0.1.35:10250, namespace=victoriametrics, node=hgx-083, pod=victoria-logs-victoria-logs-cluster-vlstorage-0} value=80.83935976028442 ]",
+            },
+            {
+                "status": "resolved",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "container": "vlstorage",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.1.35:10250",
+                    "namespace": "victoriametrics",
+                    "node": "hgx-083",
+                    "pod": "victoria-logs-victoria-logs-cluster-vlstorage-0",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-0 Memory usage is above 90% (current value is: 80.77)",
+                    "grafana_state_reason": "Updated",
+                    "summary": "Pod victoria-logs-victoria-logs-cluster-vlstorage-0 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "2026-05-09T06:58:20.025587481Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "f9bc9995840676d6",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dvlstorage&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.35%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-083&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-0&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": None,
+                "valueString": "[ var='A' labels={container=vlstorage, instance=10.0.1.35:10250, namespace=victoriametrics, node=hgx-083, pod=victoria-logs-victoria-logs-cluster-vlstorage-0} value=80.76558113098145 ]",
+            },
+            {
+                "status": "resolved",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.1.42:10250",
+                    "namespace": "monitoring",
+                    "node": "hgx-090",
+                    "pod": "prometheus-kube-prometheus-prometheus-0",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: monitoring/prometheus-kube-prometheus-prometheus-0 Memory usage is above 90% (current value is: 76.23)",
+                    "grafana_state_reason": "Updated",
+                    "summary": "Pod prometheus-kube-prometheus-prometheus-0 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "2026-05-09T06:58:20.025587481Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "f3a3342186221d30",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.42%3A10250&matcher=namespace%3Dmonitoring&matcher=node%3Dhgx-090&matcher=pod%3Dprometheus-kube-prometheus-prometheus-0&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": None,
+                "valueString": "[ var='A' labels={instance=10.0.1.42:10250, namespace=monitoring, node=hgx-090, pod=prometheus-kube-prometheus-prometheus-0} value=76.22697290739838 ]",
+            },
+            {
+                "status": "resolved",
+                "labels": {
+                    "alertname": "PodMemoryUsage>95%",
+                    "container": "prometheus",
+                    "grafana_folder": "Alert rules",
+                    "instance": "10.0.1.42:10250",
+                    "namespace": "monitoring",
+                    "node": "hgx-090",
+                    "pod": "prometheus-kube-prometheus-prometheus-0",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "description": "Pod: monitoring/prometheus-kube-prometheus-prometheus-0 Memory usage is above 90% (current value is: 76.28)",
+                    "grafana_state_reason": "Updated",
+                    "summary": "Pod prometheus-kube-prometheus-prometheus-0 High Memory usage detected",
+                },
+                "startsAt": "2026-05-09T05:33:40Z",
+                "endsAt": "2026-05-09T06:58:20.025587481Z",
+                "generatorURL": "https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1",
+                "fingerprint": "a8bdf7449752ec4f",
+                "silenceURL": "https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dprometheus&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.42%3A10250&matcher=namespace%3Dmonitoring&matcher=node%3Dhgx-090&matcher=pod%3Dprometheus-kube-prometheus-prometheus-0&matcher=severity%3Dcritical&orgId=1",
+                "dashboardURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1",
+                "panelURL": "https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11",
+                "values": None,
+                "valueString": "[ var='A' labels={container=prometheus, instance=10.0.1.42:10250, namespace=monitoring, node=hgx-090, pod=prometheus-kube-prometheus-prometheus-0} value=76.27774477005005 ]",
+            },
+        ],
+        "groupLabels": {
+            "alertname": "PodMemoryUsage>95%",
+            "grafana_folder": "Alert rules",
+        },
+        "commonLabels": {
+            "alertname": "PodMemoryUsage>95%",
+            "grafana_folder": "Alert rules",
+            "severity": "critical",
+        },
+        "commonAnnotations": {"grafana_state_reason": "Updated"},
+        "externalURL": "https://grafana-yunqiao.magikcloud.cn/",
+        "version": "1",
+        "groupKey": '{}/{__grafana_autogenerated__="true"}/{__grafana_receiver__="test_json"}:{alertname="PodMemoryUsage>95%", grafana_folder="Alert rules"}',
+        "truncatedAlerts": 0,
+        "orgId": 1,
+        "title": "[RESOLVED] PodMemoryUsage>95% Alert rules (critical)",
+        "state": "ok",
+        "message": (
+            "**Resolved**\n\n"
+            "Value: [no value]\n"
+            "Labels:\n"
+            " - alertname = PodMemoryUsage>95%\n"
+            " - grafana_folder = Alert rules\n"
+            " - instance = 10.0.0.14:10250\n"
+            " - namespace = victoriametrics\n"
+            " - node = hgx-014\n"
+            " - pod = victoria-logs-victoria-logs-cluster-vlstorage-1\n"
+            " - severity = critical\n"
+            "Annotations:\n"
+            " - description = Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-1 Memory usage is above 90% (current value is: 79.38)\n"
+            " - grafana_state_reason = Updated\n"
+            " - summary = Pod victoria-logs-victoria-logs-cluster-vlstorage-1 High Memory usage detected\n"
+            "Source: https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1\n"
+            "Silence: https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.14%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-014&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-1&matcher=severity%3Dcritical&orgId=1\n"
+            "Dashboard: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1\n"
+            "Panel: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11\n\n"
+            "Value: [no value]\n"
+            "Labels:\n"
+            " - alertname = PodMemoryUsage>95%\n"
+            " - container = registry\n"
+            " - grafana_folder = Alert rules\n"
+            " - instance = 10.0.0.44:10250\n"
+            " - namespace = harbor\n"
+            " - node = hgx-044\n"
+            " - pod = harbor-registry-58f698c8b4-rkhsh\n"
+            " - severity = critical\n"
+            "Annotations:\n"
+            " - description = Pod: harbor/harbor-registry-58f698c8b4-rkhsh Memory usage is above 90% (current value is: 66.19)\n"
+            " - grafana_state_reason = Updated\n"
+            " - summary = Pod harbor-registry-58f698c8b4-rkhsh High Memory usage detected\n"
+            "Source: https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1\n"
+            "Silence: https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=container%3Dregistry&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.0.44%3A10250&matcher=namespace%3Dharbor&matcher=node%3Dhgx-044&matcher=pod%3Dharbor-registry-58f698c8b4-rkhsh&matcher=severity%3Dcritical&orgId=1\n"
+            "Dashboard: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1\n"
+            "Panel: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11\n\n"
+            "Value: [no value]\n"
+            "Labels:\n"
+            " - alertname = PodMemoryUsage>95%\n"
+            " - grafana_folder = Alert rules\n"
+            " - instance = 10.0.1.35:10250\n"
+            " - namespace = victoriametrics\n"
+            " - node = hgx-083\n"
+            " - pod = victoria-logs-victoria-logs-cluster-vlstorage-0\n"
+            " - severity = critical\n"
+            "Annotations:\n"
+            " - description = Pod: victoriametrics/victoria-logs-victoria-logs-cluster-vlstorage-0 Memory usage is above 90% (current value is: 80.84)\n"
+            " - grafana_state_reason = Updated\n"
+            " - summary = Pod victoria-logs-victoria-logs-cluster-vlstorage-0 High Memory usage detected\n"
+            "Source: https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1\n"
+            "Silence: https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.35%3A10250&matcher=namespace%3Dvictoriametrics&matcher=node%3Dhgx-083&matcher=pod%3Dvictoria-logs-victoria-logs-cluster-vlstorage-0&matcher=severity%3Dcritical&orgId=1\n"
+            "Dashboard: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1\n"
+            "Panel: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11\n\n"
+            "Value: [no value]\n"
+            "Labels:\n"
+            " - alertname = PodMemoryUsage>95%\n"
+            " - grafana_folder = Alert rules\n"
+            " - instance = 10.0.1.42:10250\n"
+            " - namespace = monitoring\n"
+            " - node = hgx-090\n"
+            " - pod = prometheus-kube-prometheus-prometheus-0\n"
+            " - severity = critical\n"
+            "Annotations:\n"
+            " - description = Pod: monitoring/prometheus-kube-prometheus-prometheus-0 Memory usage is above 90% (current value is: 76.23)\n"
+            " - grafana_state_reason = Updated\n"
+            " - summary = Pod prometheus-kube-prometheus-prometheus-0 High Memory usage detected\n"
+            "Source: https://grafana-yunqiao.magikcloud.cn/alerting/grafana/bf61igowd36dcf/view?orgId=1\n"
+            "Silence: https://grafana-yunqiao.magikcloud.cn/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DPodMemoryUsage%3E95%25&matcher=grafana_folder%3DAlert+rules&matcher=instance%3D10.0.1.42%3A10250&matcher=namespace%3Dmonitoring&matcher=node%3Dhgx-090&matcher=pod%3Dprometheus-kube-prometheus-prometheus-0&matcher=severity%3Dcritical&orgId=1\n"
+            "Dashboard: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1\n"
+            "Panel: https://grafana-yunqiao.magikcloud.cn/d/D2mTcf8Vk2?orgId=1&viewPanel=11"
+        ),
+    }
+    return payload
+
+
+def send_alert(url: str, payload: dict):
+    """发送告警请求"""
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Grafana",
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        print(f"状态码: {resp.status_code}")
+        print(f"响应内容: {json.dumps(resp.json(), indent=2, ensure_ascii=False)}")
+        return resp
+    except requests.exceptions.ConnectionError:
+        print(f"❌ 连接失败，请确认服务是否启动: {url}")
+    except Exception as e:
+        print(f"❌ 请求异常: {e}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="模拟 Grafana 告警发送")
+    parser.add_argument(
+        "--url",
+        default=f"{BASE_URL}{API_PATH}",
+        help=f"目标 URL (默认: {BASE_URL}{API_PATH})",
+    )
+    parser.add_argument(
+        "--status",
+        choices=["firing", "resolved", "both"],
+        default="firing",
+        help="告警状态: firing=触发告警, resolved=恢复告警, both=先触发后恢复 (默认: firing)",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        help="每种状态发送次数 (默认: 1)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="多次发送间隔秒数 (默认: 2.0)",
+    )
+    args = parser.parse_args()
+
+    statuses = []
+    if args.status == "both":
+        statuses = ["firing", "resolved"]
+    else:
+        statuses = [args.status]
+
+    total = len(statuses) * args.count
+    sent = 0
+
+    for status in statuses:
+        payload = build_grafana_alert_payload(status)
+        status_label = "🔥 FIRING" if status == "firing" else "✅ RESOLVED"
+        print(f"{'='*60}")
+        print(f"📋 告警状态: {status_label}")
+        print(f"   告警标题: {payload['title']}")
+        print(f"   告警数量: {len(payload['alerts'])}")
+        print(f"{'='*60}")
+        print()
+
+        for i in range(args.count):
+            if sent > 0:
+                print(f"⏳ 等待 {args.interval}s ...")
+                time.sleep(args.interval)
+            sent += 1
+            print(f"📤 第 {sent}/{total} 次发送 [{status_label}]:")
+            send_alert(args.url, payload)
+            print()

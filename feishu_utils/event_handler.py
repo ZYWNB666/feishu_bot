@@ -9,9 +9,11 @@ import logging
 import re
 import threading
 import time
-from .bot_msg_format import bot_add_msg_to_group, user_add_msg_to_group
-from jira_utils.jira_all_class import JiraClient
+from datetime import datetime
+
 from config.config import Config
+from jira_utils.jira_all_class import JiraClient
+from .bot_msg_format import bot_add_msg_to_group, user_add_msg_to_group
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +104,7 @@ def handle_message_received(feishu_client, event_data):
         message = event.get("message", {})
         sender = event.get("sender", {})
 
-        logging.debug("Received message content: %s", event)
+        logger.debug("Received message content: %s", event)
         
         # 获取消息内容
         content_str = message.get("content")
@@ -114,7 +116,7 @@ def handle_message_received(feishu_client, event_data):
         try:
             content = json.loads(content_str)
         except json.JSONDecodeError as e:
-            logger.error(f"解析消息内容失败: {e}")
+            logger.error("解析消息内容失败: %s", e)
             return False
         
         # 获取消息文本
@@ -131,9 +133,14 @@ def handle_message_received(feishu_client, event_data):
         group_id = None
         if chat_type == "group":
             group_id = event.get("message").get("chat_id")
-        
+
         # 检查是否有@机器人
         mentions = message.get("mentions", [])
+
+        # 群聊中只响应被@的消息，私聊不限制
+        if chat_type == "group" and not mentions:
+            logger.debug("群聊消息未@机器人，忽略")
+            return True
         
         # 解析命令（去除@内容）
         # 如果消息以@开头，提取实际的命令文本
@@ -187,7 +194,7 @@ def handle_message_received(feishu_client, event_data):
             # 使用引用回复（卡片消息）
             reply_content = json.dumps(card_data)
             feishu_client.reply_message(message_id, "interactive", reply_content)
-            logger.info(f"已回复myuid命令给用户 {sender_id}")
+            logger.info("已回复myuid命令给用户 %s", sender_id)
 
         elif command == "groupid":
             # 检查是否在群聊中
@@ -208,7 +215,7 @@ def handle_message_received(feishu_client, event_data):
                 }
                 reply_content = json.dumps(error_card)
                 feishu_client.reply_message(message_id, "interactive", reply_content)
-                logger.info(f"用户 {sender_id} 在非群聊环境中使用groupid命令")
+                logger.info("用户 %s 在非群聊环境中使用groupid命令", sender_id)
                 return True
             
             # 构建卡片消息（支持 Markdown）
@@ -237,7 +244,7 @@ def handle_message_received(feishu_client, event_data):
             # 使用引用回复（卡片消息）
             reply_content = json.dumps(card_data)
             feishu_client.reply_message(message_id, "interactive", reply_content)
-            logger.info(f"已回复groupid命令给用户 {sender_id}")
+            logger.info("已回复groupid命令给用户 %s", sender_id)
 
         elif command == "/jira":
             # 处理 Jira 邀请命令
@@ -296,8 +303,7 @@ def handle_message_received(feishu_client, event_data):
                 return True
             
             # 验证邮箱后缀
-            config = Config()
-            allowed_suffixes = config.JIRA_ALLOWED_EMAIL_SUFFIXES
+            allowed_suffixes = Config.JIRA_ALLOWED_EMAIL_SUFFIXES
             if allowed_suffixes:
                 # 解析允许的后缀列表
                 suffix_list = [s.strip().lower() for s in allowed_suffixes.split(",") if s.strip()]
@@ -364,10 +370,10 @@ def handle_message_received(feishu_client, event_data):
                     reply_content = json.dumps(error_card)
                 
                 feishu_client.reply_message(message_id, "interactive", reply_content)
-                logger.info(f"已处理 /jira 命令，邮箱: {email}, 结果: {result['success']}")
+                logger.info("已处理 /jira 命令，邮箱: %s, 结果: %s", email, result['success'])
                 
             except Exception as e:
-                logger.error(f"处理 /jira 命令失败: {e}", exc_info=True)
+                logger.error("处理 /jira 命令失败: %s", e, exc_info=True)
                 error_card = {
                     "config": {"wide_screen_mode": True},
                     "header": {
@@ -412,15 +418,14 @@ def handle_message_received(feishu_client, event_data):
             # 使用引用回复（卡片消息）
             reply_content = json.dumps(card_data)
             feishu_client.reply_message(message_id, "interactive", reply_content)
-            logger.info(f"已回复help命令给用户 {sender_id}")
-            logger.debug(f"收到未知命令: {command}")
+            logger.info("已回复help命令给用户 %s", sender_id)
+            logger.debug("收到未知命令: %s", command)
         
         return True
         
     except Exception as e:
-        logger.error(f"处理消息失败: {e}", exc_info=True)
+        logger.error("处理消息失败: %s", e, exc_info=True)
         return False
-
 
 
 def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, alertname="告警通知", severity="warning", maid=None):
@@ -572,22 +577,21 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
         
         # 发送卡片消息
         content = json.dumps(card_data)
-        feishu_client.send("chat_id", group_id, "interactive", content)
-        
-        logger.info("✅ 已向群聊 %s 发送告警卡片消息", group_id)
+        message_id = feishu_client.send("chat_id", group_id, "interactive", content)
+
+        logger.info("✅ 已向群聊 %s 发送告警卡片消息, message_id=%s", group_id, message_id)
         if mentioned_user_list:
             logger.info("📢 艾特用户: %s", ", ".join(mentioned_user_list))
-        
-        return 200
-        
+
+        return message_id
+
     except Exception as e:
         logger.error("发送告警信息失败: %s", e, exc_info=True)
-        return 500
+        return ''
 
 
 def _get_current_time():
     """获取当前时间字符串"""
-    from datetime import datetime
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 

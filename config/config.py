@@ -46,6 +46,9 @@ class Config:
     # 允许的邮箱后缀列表，多个后缀用逗号分隔，如 "@company.com,@example.com"
     # 留空则不限制邮箱后缀
     JIRA_ALLOWED_EMAIL_SUFFIXES = os.getenv("JIRA_ALLOWED_EMAIL_SUFFIXES", "")
+
+    # ==================== Grafana配置 ====================
+    GRAFANA_API_KEY = os.getenv("GRAFANA_API_KEY", "")
     
     @classmethod
     def get_config_db_config(cls):

@@ -52,7 +52,7 @@ def _make_card_action_bridge(feishu_client):
     return bridge
 
 
-def start_ws_client(app_id: str, app_secret: str, feishu_client, log_level=lark.LogLevel.INFO):
+def start_ws_client(app_id: str, app_secret: str, feishu_client, log_level=lark.LogLevel.INFO, debug: bool = False):
     """
     构建 EventDispatcherHandler 并启动 WebSocket 长连接。
     该函数会阻塞当前线程，请在守护线程中调用。
@@ -62,7 +62,12 @@ def start_ws_client(app_id: str, app_secret: str, feishu_client, log_level=lark.
         app_secret: 飞书应用 App Secret
         feishu_client: FeishuApiClient 实例，用于发送消息
         log_level: SDK 日志级别
+        debug: 保留参数，当前未使用
     """
+    import logging as _logging
+    # 始终压制 websockets 协议层心跳日志
+    _logging.getLogger("websockets").setLevel(_logging.WARNING)
+    _logging.getLogger("websockets.client").setLevel(_logging.WARNING)
     eb = _make_event_bridge
     cb = _make_card_action_bridge(feishu_client)
 
@@ -95,7 +100,7 @@ def start_ws_client(app_id: str, app_secret: str, feishu_client, log_level=lark.
     ws_cli.start()  # 阻塞，内部自动重连
 
 
-def start_ws_client_in_thread(app_id: str, app_secret: str, feishu_client) -> threading.Thread:
+def start_ws_client_in_thread(app_id: str, app_secret: str, feishu_client, debug: bool = False) -> threading.Thread:
     """
     在守护线程中启动 WebSocket 长连接，不阻塞主线程（Flask 服务）。
 
@@ -105,6 +110,7 @@ def start_ws_client_in_thread(app_id: str, app_secret: str, feishu_client) -> th
     t = threading.Thread(
         target=start_ws_client,
         args=(app_id, app_secret, feishu_client),
+        kwargs={"debug": debug},
         daemon=True,
         name="feishu-ws-client",
     )
