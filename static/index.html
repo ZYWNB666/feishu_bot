@@ -428,14 +428,49 @@
             font-size: 14px;
             color: #4a5568;
         }
+
+        /* Tab 导航 */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 20px;
+        }
+        .tab-btn {
+            padding: 10px 24px;
+            border: none;
+            border-radius: 8px 8px 0 0;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 500;
+            background: rgba(255,255,255,0.25);
+            color: white;
+            transition: all 0.2s;
+        }
+        .tab-btn.active {
+            background: white;
+            color: #667eea;
+        }
+        .tab-btn:not(.active):hover {
+            background: rgba(255,255,255,0.4);
+        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔔 告警规则管理</h1>
-            <p>管理Prometheus告警通知规则和飞书群组配置</p>
+            <h1>🔔 AlertBot 管理后台</h1>
+            <p>管理告警路由规则和飞书用户信息</p>
         </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" id="tab-btn-rules" onclick="switchTab('rules')">📋 告警规则</button>
+            <button class="tab-btn" id="tab-btn-users" onclick="switchTab('users')">👥 飞书用户</button>
+        </div>
+
+        <!-- 告警规则 Tab -->
+        <div id="tab-rules" class="tab-panel active">
 
         <div class="toolbar">
             <div>
@@ -475,6 +510,71 @@
                 <tbody id="rulesTableBody">
                 </tbody>
             </table>
+        </div>
+        </div><!-- /tab-rules -->
+
+        <!-- 飞书用户 Tab -->
+        <div id="tab-users" class="tab-panel">
+            <div class="toolbar">
+                <div>
+                    <span style="color:#718096;font-size:14px;">共 <strong id="userCount">0</strong> 位用户</span>
+                </div>
+                <button class="btn btn-primary" onclick="openUserModal()">➕ 添加用户</button>
+            </div>
+            <div class="table-container">
+                <div id="userLoading" class="loading"><p>加载中...</p></div>
+                <div id="userEmpty" class="empty-state" style="display:none;">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0"/>
+                    </svg>
+                    <h3>暂无用户</h3>
+                    <p>点击上方"添加用户"按钮录入飞书用户信息</p>
+                </div>
+                <table id="usersTable" style="display:none;">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>姓名</th>
+                            <th>Open ID</th>
+                            <th>备注</th>
+                            <th>创建时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usersTableBody"></tbody>
+                </table>
+            </div>
+        </div><!-- /tab-users -->
+
+    </div><!-- /container -->
+
+    <!-- 飞书用户弹窗 -->
+    <div id="userModal" class="modal">
+        <div class="modal-content" style="max-width:480px;">
+            <div class="modal-header">
+                <h2 id="userModalTitle">添加飞书用户</h2>
+                <button class="close-btn" onclick="closeUserModal()">&times;</button>
+            </div>
+            <form id="userForm" onsubmit="submitUser(event)">
+                <div class="form-group">
+                    <label>姓名 <span class="required">*</span></label>
+                    <input type="text" id="u_name" required placeholder="例如：张三">
+                    <small>与 Flashcat 中的姓名保持一致，用于 oncall 艾特匹配</small>
+                </div>
+                <div class="form-group">
+                    <label>Open ID <span class="required">*</span></label>
+                    <input type="text" id="u_open_id" required placeholder="例如：ou_xxxxxxxxxxxxxxxx">
+                    <small>飞书用户的 open_id，以 ou_ 开头</small>
+                </div>
+                <div class="form-group">
+                    <label>备注</label>
+                    <input type="text" id="u_remark" placeholder="可选，例如：后端组">
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">
+                    <button type="button" class="btn btn-secondary" onclick="closeUserModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
         </div>
     </div>
 
@@ -519,7 +619,23 @@
                 </div>
 
                 <div class="form-group">
-                    <label>通知人员ID <span class="required">*</span></label>
+                    <label>Oncall 同步</label>
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:normal;">
+                        <input type="checkbox" id="oncall_sync" name="oncall_sync" onchange="onOncallSyncChange()" style="width:18px;height:18px;cursor:pointer;">
+                        <span>从 Flashcat 同步当前 oncall 人员进行艾特</span>
+                    </label>
+                    <small>开启后将忽略下方静态人员列表，实时从 Flashcat 排班系统获取当班人员</small>
+                </div>
+
+                <div class="form-group" id="flashcatScheduleGroup" style="display:none;">
+                    <label>Flashcat 排班 ID</label>
+                    <input type="text" id="flashcat_schedule_id" name="flashcat_schedule_id"
+                           placeholder="例如: 5511541227763（留空使用全局配置）">
+                    <small>覆盖全局环境变量 FLASHCAT_SCHEDULE_ID；留空则使用全局配置</small>
+                </div>
+
+                <div class="form-group" id="usersGroup">
+                    <label>通知人员ID <span class="required" id="usersRequired">*</span></label>
                     <div class="tag-input-container" id="usersContainer" onclick="focusUserInput()">
                         <input type="text" class="tag-input" id="userInput" 
                                placeholder="输入人员ID后按回车添加（如：ou_xxxxx）" 
@@ -536,7 +652,7 @@
                     <small>达到这些级别时艾特人员，多个级别用逗号分隔</small>
                 </div>
 
-                <div class="form-group">
+                <div class="form-group" id="alertmanagerUrlGroup">
                     <label>Alertmanager地址</label>
                     <input type="url" id="alertmanager_url" name="alertmanager_url"
                            placeholder="例如: http://alertmanager:9093">
@@ -545,7 +661,7 @@
 
                 <div class="form-group">
                     <label>告警模板 <span class="required">*</span></label>
-                    <select id="template_type" name="template_type">
+                    <select id="template_type" name="template_type" onchange="onTemplateTypeChange()">
                         <option value="ops">ops - 运维模板（Alertmanager 格式）</option>
                         <option value="biz">biz - 业务模板（Grafana 格式，含面板链接）</option>
                     </select>
@@ -706,7 +822,7 @@
                     <td><strong>${rule.alert_id}</strong></td>
                     <td>${rule.project}</td>
                     <td><code>${rule.group_id}</code></td>
-                    <td>${users.length}人</td>
+                    <td>${rule.oncall_sync ? '<span class="badge badge-info">🔄 Oncall</span>' : users.length + '人'}</td>
                     <td>
                         ${rule.rank.split(',').map(r => {
                             const rank = r.trim();
@@ -747,6 +863,10 @@
                 renderUserTags();
                 generateAlertId(); // 自动生成Alert ID
                 generateBtn.style.display = 'inline-block'; // 显示生成按钮
+                // 重置 oncall 相关
+                document.getElementById('oncall_sync').checked = false;
+                document.getElementById('flashcat_schedule_id').value = '';
+                onOncallSyncChange();
             } else {
                 generateBtn.style.display = 'none'; // 编辑时隐藏生成按钮
             }
@@ -761,7 +881,15 @@
             labelRuleCounter = 0;
             document.getElementById('labelRulesList').innerHTML = '';
             document.getElementById('grafanaUrlGroup').style.display = 'none';
+            document.getElementById('alertmanagerUrlGroup').style.display = 'block';
             renderUserTags();
+        }
+
+        // template_type 联动显示/隐藏 alertmanager_url
+        function onTemplateTypeChange() {
+            const templateType = document.getElementById('template_type').value;
+            const alertmanagerGroup = document.getElementById('alertmanagerUrlGroup');
+            alertmanagerGroup.style.display = templateType === 'biz' ? 'none' : 'block';
         }
 
         // silence_type 联动显示/隐藏 grafana_url
@@ -903,8 +1031,9 @@
         async function submitForm(event) {
             event.preventDefault();
             
-            if (currentUsers.length === 0) {
-                showToast('请至少添加一个通知人员ID', 'error');
+            const oncallSync = document.getElementById('oncall_sync').checked;
+            if (!oncallSync && currentUsers.length === 0) {
+                showToast('请至少添加一个通知人员ID，或开启 Oncall 同步', 'error');
                 return;
             }
 
@@ -919,7 +1048,9 @@
                 silence_type: document.getElementById('silence_type').value,
                 grafana_url: document.getElementById('grafana_url').value || null,
                 remark: document.getElementById('remark').value || null,
-                label_rules: getLabelRules()
+                label_rules: getLabelRules(),
+                oncall_sync: oncallSync ? 1 : 0,
+                flashcat_schedule_id: document.getElementById('flashcat_schedule_id').value || null
             };
 
             try {
@@ -974,9 +1105,15 @@
                         document.getElementById('template_type').value = rule.template_type || 'ops';
                         document.getElementById('silence_type').value = rule.silence_type || 'alertmanager';
                         document.getElementById('grafana_url').value = rule.grafana_url || '';
+                        onTemplateTypeChange();
                         onSilenceTypeChange();
                         document.getElementById('remark').value = rule.remark || '';
                         
+                        // 填充 oncall 相关
+                        document.getElementById('oncall_sync').checked = !!rule.oncall_sync;
+                        document.getElementById('flashcat_schedule_id').value = rule.flashcat_schedule_id || '';
+                        onOncallSyncChange();
+
                         // 填充users
                         try {
                             currentUsers = JSON.parse(rule.users || '[]');
@@ -1008,6 +1145,13 @@
             }
         }
 
+        // Oncall 同步开关切换
+        function onOncallSyncChange() {
+            const enabled = document.getElementById('oncall_sync').checked;
+            document.getElementById('flashcatScheduleGroup').style.display = enabled ? 'block' : 'none';
+            document.getElementById('usersGroup').style.display = enabled ? 'none' : 'block';
+        }
+
         // 删除规则
         async function deleteRule(id, alertId) {
             if (!confirm(`确定要删除规则 "${alertId}" 吗？此操作不可恢复。`)) {
@@ -1029,6 +1173,135 @@
                 }
             } catch (error) {
                 console.error('删除失败:', error);
+                showToast('删除失败，请重试', 'error');
+            }
+        }
+
+        // ─────────────────────────────────────────
+        // Tab 切换
+        // ─────────────────────────────────────────
+        function switchTab(name) {
+            ['rules', 'users'].forEach(t => {
+                document.getElementById('tab-' + t).classList.toggle('active', t === name);
+                document.getElementById('tab-btn-' + t).classList.toggle('active', t === name);
+            });
+            if (name === 'users') loadUsers();
+        }
+
+        // ─────────────────────────────────────────
+        // 飞书用户管理
+        // ─────────────────────────────────────────
+        let editingUserId = null;
+
+        async function loadUsers() {
+            document.getElementById('userLoading').style.display = 'block';
+            document.getElementById('usersTable').style.display = 'none';
+            document.getElementById('userEmpty').style.display = 'none';
+            try {
+                const res = await fetch('/api/feishu_users');
+                const result = await res.json();
+                const users = result.data || [];
+                document.getElementById('userCount').textContent = users.length;
+                document.getElementById('userLoading').style.display = 'none';
+                if (users.length === 0) {
+                    document.getElementById('userEmpty').style.display = 'flex';
+                    return;
+                }
+                const tbody = document.getElementById('usersTableBody');
+                tbody.innerHTML = users.map(u => `
+                    <tr>
+                        <td>${u.id}</td>
+                        <td><strong>${u.name}</strong></td>
+                        <td><code style="font-size:12px;background:#f7fafc;padding:2px 6px;border-radius:4px;">${u.open_id}</code></td>
+                        <td>${u.remark || '<span style="color:#a0aec0">-</span>'}</td>
+                        <td style="font-size:13px;color:#718096;">${(u.created_at || '').slice(0,10)}</td>
+                        <td>
+                            <button class="btn btn-secondary" style="padding:5px 12px;font-size:12px;" onclick="editUser(${u.id},'${u.name}','${u.open_id}','${u.remark||''}')">编辑</button>
+                            <button class="btn btn-danger" style="padding:5px 12px;font-size:12px;margin-left:6px;" onclick="deleteUser(${u.id},'${u.name}')">删除</button>
+                        </td>
+                    </tr>
+                `).join('');
+                document.getElementById('usersTable').style.display = 'table';
+            } catch(e) {
+                document.getElementById('userLoading').style.display = 'none';
+                showToast('加载用户列表失败', 'error');
+            }
+        }
+
+        function openUserModal() {
+            editingUserId = null;
+            document.getElementById('userModalTitle').textContent = '添加飞书用户';
+            document.getElementById('u_name').value = '';
+            document.getElementById('u_open_id').value = '';
+            document.getElementById('u_remark').value = '';
+            document.getElementById('u_name').readOnly = false;
+            document.getElementById('userModal').style.display = 'flex';
+        }
+
+        function editUser(id, name, open_id, remark) {
+            editingUserId = id;
+            document.getElementById('userModalTitle').textContent = '编辑飞书用户';
+            document.getElementById('u_name').value = name;
+            document.getElementById('u_open_id').value = open_id;
+            document.getElementById('u_remark').value = remark;
+            document.getElementById('userModal').style.display = 'flex';
+        }
+
+        function closeUserModal() {
+            document.getElementById('userModal').style.display = 'none';
+        }
+
+        async function submitUser(e) {
+            e.preventDefault();
+            const name = document.getElementById('u_name').value.trim();
+            const open_id = document.getElementById('u_open_id').value.trim();
+            const remark = document.getElementById('u_remark').value.trim();
+
+            if (!open_id.startsWith('ou_')) {
+                showToast('Open ID 格式不正确，应以 ou_ 开头', 'error');
+                return;
+            }
+
+            try {
+                let res, result;
+                if (editingUserId) {
+                    res = await fetch(`/api/feishu_users/${editingUserId}`, {
+                        method: 'PUT',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({name, open_id, remark: remark || null})
+                    });
+                } else {
+                    res = await fetch('/api/feishu_users', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({name, open_id, remark: remark || null})
+                    });
+                }
+                result = await res.json();
+                if (result.code === 0) {
+                    showToast(editingUserId ? '用户已更新' : '用户已添加');
+                    closeUserModal();
+                    loadUsers();
+                } else {
+                    showToast('操作失败: ' + result.msg, 'error');
+                }
+            } catch(err) {
+                showToast('操作失败，请重试', 'error');
+            }
+        }
+
+        async function deleteUser(id, name) {
+            if (!confirm(`确认删除用户「${name}」？`)) return;
+            try {
+                const res = await fetch(`/api/feishu_users/${id}`, {method: 'DELETE'});
+                const result = await res.json();
+                if (result.code === 0) {
+                    showToast('已删除用户：' + name);
+                    loadUsers();
+                } else {
+                    showToast('删除失败: ' + result.msg, 'error');
+                }
+            } catch(e) {
                 showToast('删除失败，请重试', 'error');
             }
         }

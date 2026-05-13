@@ -1,0 +1,270 @@
+---
+# =============================================
+# Namespace
+# =============================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: feishu-bot
+
+---
+# =============================================
+# Secret: 所有敏感配置
+# =============================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: feishu-bot-secret
+  namespace: feishu-bot
+type: Opaque
+stringData:
+  # Feishu App
+  APP_ID: "cli_a9a720278879dbb4"
+  APP_SECRET: "26YOsEhHdQ3ms4UP2dtwXfPDA7u1v3jz"
+  # Grafana
+  GRAFANA_API_KEY: "your-grafana-api-key-here"
+  # MySQL（指向 K8s 内部 Service）
+  MYSQL_HOST: "mysql"
+  MYSQL_PORT: "3306"
+  MYSQL_USER: "feishu_bot"
+  MYSQL_PASSWORD: "feishu_bot@123"
+  MYSQL_DATABASE: "alert_db"
+  MYSQL_ROOT_PASSWORD: "root@feishu2024"
+  # App
+  HOST: "0.0.0.0"
+  PORT: "3100"
+  DEBUG: "false"
+
+---
+# =============================================
+# PVC: MySQL 数据持久化（ceph-fs）
+# =============================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-data-pvc
+  namespace: feishu-bot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ceph-fs
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# =============================================
+# ConfigMap: MySQL 初始化脚本
+# =============================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-initdb
+  namespace: feishu-bot
+data:
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS alert_db DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    USE alert_db;
+
+    CREATE TABLE IF NOT EXISTS alert_config (
+        id INT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+        group_id VARCHAR(128) NOT NULL COMMENT '群组ID',
+        users JSON NOT NULL COMMENT '用户列表(JSON数组)',
+        alert_id VARCHAR(64) NOT NULL COMMENT '告警ID',
+        `rank` VARCHAR(64) NOT NULL COMMENT '告警级别',
+        telephone_url VARCHAR(255) DEFAULT NULL COMMENT '电话告警URL',
+        telephone_rank VARCHAR(64) DEFAULT NULL COMMENT '电话告警级别',
+        alertmanager_url VARCHAR(255) NOT NULL COMMENT 'Alertmanager地址',
+        project VARCHAR(128) NOT NULL COMMENT '项目名',
+        remark VARCHAR(300) DEFAULT NULL COMMENT '备注',
+        label_rules JSON DEFAULT NULL COMMENT '标签匹配规则',
+        template_type VARCHAR(16) NOT NULL DEFAULT 'ops' COMMENT '卡片模板类型: ops / biz',
+        silence_type VARCHAR(16) NOT NULL DEFAULT 'alertmanager' COMMENT '静默方式: alertmanager / grafana',
+        grafana_url VARCHAR(255) DEFAULT NULL COMMENT 'Grafana地址',
+        UNIQUE KEY uq_alert_id (alert_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+    CREATE TABLE IF NOT EXISTS alert_data (
+        id VARCHAR(32) PRIMARY KEY COMMENT '唯一ID',
+        alertlabels JSON NOT NULL COMMENT '告警标签(JSON)',
+        project VARCHAR(128) NOT NULL COMMENT '项目名',
+        alerttime VARCHAR(32) NOT NULL COMMENT '告警时间(ISO格式)',
+        silenceid JSON DEFAULT NULL COMMENT '静默ID列表(JSON)',
+        message_id VARCHAR(64) DEFAULT NULL COMMENT '飞书消息 ID',
+        fingerprints JSON DEFAULT NULL COMMENT '告警指纹列表'
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+---
+# =============================================
+# Deployment: MySQL 8.0
+# =============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: feishu-bot
+  labels:
+    app: mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: feishu-bot-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: feishu-bot-secret
+                  key: MYSQL_DATABASE
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: feishu-bot-secret
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: feishu-bot-secret
+                  key: MYSQL_PASSWORD
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+            - name: mysql-initdb
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+                - -u
+                - root
+                - --password=$(MYSQL_ROOT_PASSWORD)
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: mysql-data-pvc
+        - name: mysql-initdb
+          configMap:
+            name: mysql-initdb
+
+---
+# =============================================
+# Service: MySQL（ClusterIP，仅内部访问）
+# =============================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: feishu-bot
+spec:
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+      targetPort: 3306
+
+---
+# =============================================
+# Deployment: feishu-bot 应用
+# =============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feishu-bot
+  namespace: feishu-bot
+  labels:
+    app: feishu-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: feishu-bot
+  template:
+    metadata:
+      labels:
+        app: feishu-bot
+    spec:
+      initContainers:
+        # 等待 MySQL 就绪后再启动 App
+        - name: wait-for-mysql
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z mysql 3306; do
+                echo "waiting for mysql..."; sleep 3;
+              done
+      containers:
+        - name: feishu-bot
+          image: harbor.magikcloud.cn/public/feishu_bot:v0.1
+          ports:
+            - containerPort: 3100
+          envFrom:
+            - secretRef:
+                name: feishu-bot-secret
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3100
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3100
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+---
+# =============================================
+# Service: feishu-bot（NodePort 对外暴露）
+# =============================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: feishu-bot
+  namespace: feishu-bot
+spec:
+  type: NodePort
+  selector:
+    app: feishu-bot
+  ports:
+    - port: 3100
+      targetPort: 3100
+      nodePort: 30100

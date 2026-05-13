@@ -49,6 +49,16 @@ class Config:
 
     # ==================== Grafana配置 ====================
     GRAFANA_API_KEY = os.getenv("GRAFANA_API_KEY", "")
+
+    # ==================== Flashcat oncall 配置 ====================
+    # Flashcat API key，用于查询排班信息
+    FLASHCAT_APP_KEY = os.getenv("FLASHCAT_APP_KEY", "")
+    # 全局默认排班 ID（可被 alert_config 表中 flashcat_schedule_id 字段覆盖）
+    FLASHCAT_SCHEDULE_ID = os.getenv("FLASHCAT_SCHEDULE_ID", "")
+    # 飞书用户访问令牌，用于通过姓名搜索用户 open_id（艾特所需）
+    FEISHU_USER_ACCESS_TOKEN = os.getenv("FEISHU_USER_ACCESS_TOKEN", "")
+    # 电话告警 integration_key（severity=phone 时触发，通过 Flashcat Grafana 兼容接口发送）
+    FLASHCAT_PHONE_INTEGRATION_KEY = os.getenv("FLASHCAT_PHONE_INTEGRATION_KEY", "ea9548ec10fa549699a6c0544a21bf0a895")
     
     @classmethod
     def get_config_db_config(cls):

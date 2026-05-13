@@ -450,7 +450,12 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
             "critical": "red",
             "warning": "orange", 
             "info": "blue",
-            "success": "green"
+            "success": "green",
+            # P 级别
+            "p0": "red",
+            "p1": "orange",
+            "p2": "yellow",
+            "p3": "blue",
         }
         template_color = color_map.get(severity.lower(), "orange")
         

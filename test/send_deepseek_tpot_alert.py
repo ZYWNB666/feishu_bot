@@ -39,6 +39,7 @@ def _build_firing_payload():
                     "alertname": "DeepSeek-V4-Pro-TPOT-P50超出阈值-test",
                     "ep": "ep-deepseek-v4-pro-99958a",
                     "grafana_folder": "Alert rules",
+                    "severity": "p0",
                 },
                 "annotations": {
                     "description": "DeepSeek-V4-Pro 当前TPOT的值为：12.5ms，应该在25ms以内",
@@ -103,6 +104,7 @@ def _build_resolved_payload():
                     "alertname": "DeepSeek-V4-Pro-TPOT-P50超出阈值-test",
                     "ep": "ep-deepseek-v4-pro-99958a",
                     "grafana_folder": "Alert rules",
+                    "severity": "p0",
                 },
                 "annotations": {
                     "description": "DeepSeek-V4-Pro 当前TPOT的值为：12.5ms，应该在25ms以内",

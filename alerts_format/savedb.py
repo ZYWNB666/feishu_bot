@@ -12,7 +12,7 @@ from config import config
 logger = logging.getLogger(__name__)
 
 
-def save_dbdata(post_data, project):
+def save_dbdata(post_data, project, group_id=None):
     json_data = [post_data]
 
     utc_now = datetime.datetime.now(pytz.utc)
@@ -59,11 +59,11 @@ def save_dbdata(post_data, project):
             logger.info("成功连接到MySQL数据库")
             cursor = connection.cursor()
             insert_query = """
-                INSERT INTO alert_data (id, alertlabels, project, alerttime, fingerprints)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO alert_data (id, alertlabels, project, alerttime, fingerprints, group_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
             """
             cursor.execute(insert_query, (
-                random_number, json_data_to_insert, project, startsAtTime, fingerprints_json
+                random_number, json_data_to_insert, project, startsAtTime, fingerprints_json, group_id
             ))
             connection.commit()
             return random_number
@@ -101,8 +101,8 @@ def update_message_id(maid: str, message_id: str) -> None:
             connection.close()
 
 
-def get_message_id_by_fingerprint(fingerprint: str) -> str:
-    """通过 fingerprint 查找对应告警的飞书消息 ID（取最新一条）"""
+def get_message_id_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
+    """通过 fingerprint（+可选 group_id）查找对应告警的飞书消息 ID（取最新一条）"""
     if not fingerprint:
         return ''
     connection = None
@@ -110,12 +110,20 @@ def get_message_id_by_fingerprint(fingerprint: str) -> str:
         db_config = config.get_alert_db_config()
         connection = mysql.connector.connect(**db_config)
         cursor = connection.cursor()
-        cursor.execute(
-            "SELECT message_id FROM alert_data "
-            "WHERE JSON_CONTAINS(fingerprints, %s) AND message_id IS NOT NULL "
-            "ORDER BY alerttime DESC LIMIT 1",
-            (json.dumps(fingerprint),)
-        )
+        if group_id:
+            cursor.execute(
+                "SELECT message_id FROM alert_data "
+                "WHERE JSON_CONTAINS(fingerprints, %s) AND message_id IS NOT NULL AND group_id = %s "
+                "ORDER BY alerttime DESC LIMIT 1",
+                (json.dumps(fingerprint), group_id)
+            )
+        else:
+            cursor.execute(
+                "SELECT message_id FROM alert_data "
+                "WHERE JSON_CONTAINS(fingerprints, %s) AND message_id IS NOT NULL "
+                "ORDER BY alerttime DESC LIMIT 1",
+                (json.dumps(fingerprint),)
+            )
         row = cursor.fetchone()
         return row[0] if row else ''
     except Error as e:

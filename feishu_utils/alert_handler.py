@@ -4,9 +4,44 @@
 处理来自 Alertmanager 的告警请求
 """
 
+import hashlib
 import json
 import logging
+import threading
+import time
 
+from config.config import Config
+
+# ── 告警去重缓存（基于 fingerprint+status 哈希，30 秒 TTL）──
+_alert_dedup_cache: dict[str, float] = {}
+_alert_dedup_lock = threading.Lock()
+_ALERT_DEDUP_TTL = 30  # 秒
+
+
+
+def _make_dedup_key(data: dict) -> str:
+    """用所有 alert 的 fingerprint+status 生成去重 key"""
+    pairs = sorted(
+        (a.get('fingerprint', ''), a.get('status', ''))
+        for a in data.get('alerts', [])
+    )
+    raw = json.dumps(pairs, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _is_duplicate(key: str) -> bool:
+    """如果 key 在 TTL 内已处理过则返回 True，否则记录并返回 False"""
+    now = time.time()
+    with _alert_dedup_lock:
+        # 清理过期记录
+        expired = [k for k, t in _alert_dedup_cache.items() if now - t > _ALERT_DEDUP_TTL]
+        for k in expired:
+            del _alert_dedup_cache[k]
+        if key in _alert_dedup_cache:
+            return True
+        _alert_dedup_cache[key] = now
+        return False
+from alerts_format.flashcat_utils import get_oncall_open_ids, send_phone_alert
 from alerts_format.alert_json_format import (
     extract_all_labels,
     extract_alertids,
@@ -43,7 +78,13 @@ def process_alert_request(data, feishu_client):
         if not data:
             logger.error("请求体不能为空")
             return {"code": 400, "msg": "请求体不能为空"}, 400
-        
+
+        # 去重：30 秒内相同 fingerprint 组合只处理一次
+        dedup_key = _make_dedup_key(data)
+        if _is_duplicate(dedup_key):
+            logger.info("告警重复，已跳过 (dedup_key=%s)", dedup_key)
+            return {"code": 0, "msg": "duplicate, skipped"}, 200
+
         # 查找匹配的告警配置
         configs = _find_alert_configs(data)
         
@@ -199,17 +240,29 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         data,
         config_row.get('project'),
         config_row.get('alertmanager_url'),
+        group_id=config_row.get('group_id'),
     )
 
     # 判断是否符合 @ 条件
     rank = config_row.get('rank', '')
+    is_phone_alert = any(s == 'phone' for s in severities)
     severity_matches = any(
         severity in [str(r) for r in rank.split(',')]
         for severity in severities
     )
-    if severity_matches:
-        mentioned_user_list = json.loads(config_row['users']) if config_row.get('users') else []
-        logger.info("符合@条件的告警级别%s | 此告警的级别 %s", rank, severities)
+    if is_phone_alert:
+        # 电话告警：强制获取 oncall 值班人进行艾特
+        mentioned_user_list = _get_oncall_mentioned_users(config_row)
+        logger.info("检测到 phone 级别告警，触发电话通知，oncall 艾特用户数 %d", len(mentioned_user_list))
+        # 异步触发电话告警，不阻塞飞书消息发送
+        _trigger_phone_alert_async(data)
+    elif severity_matches:
+        if config_row.get('oncall_sync'):
+            mentioned_user_list = _get_oncall_mentioned_users(config_row)
+        else:
+            mentioned_user_list = json.loads(config_row['users']) if config_row.get('users') else []
+        logger.info("符合@条件的告警级别 %s | 此告警的级别 %s | 艾特用户数 %d",
+                    rank, severities, len(mentioned_user_list))
     else:
         mentioned_user_list = []
 
@@ -230,7 +283,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         fingerprints = extract_fingerprints(data)
         thread_message_id = ''
         for fp in fingerprints:
-            mid = get_message_id_by_fingerprint(fp)
+            mid = get_message_id_by_fingerprint(fp, group_id=group_id)
             if mid:
                 thread_message_id = mid
                 break
@@ -295,6 +348,61 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
     else:
         logger.error("❌ 发送告警信息失败，群组: %s", group_id)
         return None
+
+
+def _get_oncall_mentioned_users(config_row: dict) -> list:
+    """从 Flashcat 获取当前 oncall 人员的飞书 open_id 列表
+
+    当 alert_config.oncall_sync=1 时调用此函数替换静态 users 列表。
+
+    优先使用 config_row 中的 flashcat_schedule_id，否则回退到全局配置
+    FLASHCAT_SCHEDULE_ID。
+
+    Args:
+        config_row: alert_config 数据库行
+
+    Returns:
+        list: 飞书 open_id 列表；配置缺失或 API 调用失败时返回空列表
+    """
+    app_key = Config.FLASHCAT_APP_KEY
+    schedule_id_str = config_row.get('flashcat_schedule_id') or Config.FLASHCAT_SCHEDULE_ID
+
+    if not app_key:
+        logger.warning("oncall_sync 已启用但 FLASHCAT_APP_KEY 未配置，跳过 oncall 艾特")
+        return []
+    if not schedule_id_str:
+        logger.warning("oncall_sync 已启用但未配置 flashcat_schedule_id 或 FLASHCAT_SCHEDULE_ID，跳过 oncall 艾特")
+        return []
+
+    try:
+        schedule_id = int(schedule_id_str)
+    except (ValueError, TypeError):
+        logger.error("flashcat_schedule_id '%s' 不是有效整数，跳过 oncall 艾特", schedule_id_str)
+        return []
+
+    return get_oncall_open_ids(app_key, schedule_id)
+
+
+def _trigger_phone_alert_async(data: dict) -> None:
+    """在后台线程中发送电话告警，不阻塞主流程
+
+    Args:
+        data: 原始告警数据
+    """
+    integration_key = Config.FLASHCAT_PHONE_INTEGRATION_KEY
+    if not integration_key:
+        logger.error("FLASHCAT_PHONE_INTEGRATION_KEY 未配置，无法触发电话告警")
+        return
+
+    def _do_send():
+        result = send_phone_alert(data, integration_key)
+        if result:
+            logger.info("📞 电话告警已成功触发")
+        else:
+            logger.error("📞 电话告警触发失败")
+
+    t = threading.Thread(target=_do_send, daemon=True)
+    t.start()
 
 
 def _build_ops_resolved_content(string_alert_info: str, alertname: str) -> str:
@@ -367,7 +475,12 @@ def _determine_alert_severity(severities):
         "warning": 3, 
         "info": 2, 
         "success": 1,
-        "resolved": 0
+        "resolved": 0,
+        # P 级别：p0 最高，p3 最低
+        "p0": 5,
+        "p1": 4,
+        "p2": 3,
+        "p3": 2,
     }
     
     alert_severity = "warning"  # 默认级别

@@ -63,15 +63,16 @@ def extract_fingerprints(alert_info_data: dict) -> list:
     return fps
 
 
-def alert_data_api(alert_info_data, project, alertmanager_url):
+def alert_data_api(alert_info_data, project, alertmanager_url, group_id=None):
     """
     处理告警数据并格式化（ops 模板使用）
     :param alert_info_data: dict, alertmanager推送的json数据
     :param project: str, 项目名称
     :param alertmanager_url: str, alertmanager地址
+    :param group_id: str, 发送目标群组ID（用于 resolved 反查）
     :return: tuple, (alerts列表, severities列表, maid, grafana_urls)
     """
-    dbid = save_dbdata(alert_info_data, project)
+    dbid = save_dbdata(alert_info_data, project, group_id=group_id)
     alerts = []
     severities = []
 
@@ -154,8 +155,7 @@ def extract_alert_raw(alert_info_data: dict) -> list:
         specific = {
             k: v for k, v in labels.items()
             if not should_filter_label(k)
-            and k != 'alertid'
-            and k != 'alertname'
+            and k not in ('alertid', 'alertname', 'severity')
             and (k not in original_common_labels or original_common_labels.get(k) != v)
         }
 

@@ -146,3 +146,50 @@ def _match_label_rules(alert_labels: dict, label_rules: dict) -> bool:
     
     # 所有规则都匹配，返回True
     return True
+
+
+# ──────────────────────────────────────────────
+# feishu_users 表：姓名 → open_id 本地映射
+# ──────────────────────────────────────────────
+
+def get_open_id_by_name(name: str) -> str:
+    """根据姓名从 feishu_users 表查询 open_id
+
+    Args:
+        name: 用户姓名（精确匹配）
+
+    Returns:
+        str: open_id，未找到返回空字符串
+    """
+    conn = get_db_conn()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT open_id FROM feishu_users WHERE name = %s LIMIT 1", (name,))
+        row = cursor.fetchone()
+        cursor.close()
+        return row["open_id"] if row else ""
+    finally:
+        conn.close()
+
+
+def get_open_ids_by_names(names: list) -> dict:
+    """批量根据姓名查询 open_id
+
+    Args:
+        names: 姓名列表
+
+    Returns:
+        dict: name -> open_id，未找到的 name 不在字典中
+    """
+    if not names:
+        return {}
+    conn = get_db_conn()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        placeholders = ",".join(["%s"] * len(names))
+        cursor.execute(f"SELECT name, open_id FROM feishu_users WHERE name IN ({placeholders})", names)
+        rows = cursor.fetchall()
+        cursor.close()
+        return {row["name"]: row["open_id"] for row in rows}
+    finally:
+        conn.close()

@@ -120,7 +120,11 @@ def build_biz_firing_card(
     :param mentioned_user_list: 需要 @ 的 open_id 列表
     :return: str, 序列化好的卡片 JSON
     """
-    color_map = {"critical": "red", "warning": "orange", "info": "blue"}
+    color_map = {
+        "critical": "red", "warning": "orange", "info": "blue",
+        # P 级别
+        "p0": "red", "p1": "orange", "p2": "yellow", "p3": "blue",
+    }
     template_color = color_map.get(severity.lower(), "orange")
 
     elements = []
@@ -191,10 +195,17 @@ def build_biz_firing_card(
             "elements": [{"tag": "plain_text", "content": f"⚠️ MAID: {maid}"}],
         })
 
+    # 标题中显示的级别标签（P 级别显示为更直观的名称）
+    severity_label_map = {
+        "p0": "P0 紧急", "p1": "P1 严重", "p2": "P2 警告", "p3": "P3 提示",
+        "critical": "critical", "warning": "warning", "info": "info",
+    }
+    severity_label = severity_label_map.get(severity.lower(), severity) if severity else ""
+
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": f"🔔 {alertname}" + (f"  [{severity}]" if severity else "")},
+            "title": {"tag": "plain_text", "content": f"🔔 {alertname}" + (f"  [{severity_label}]" if severity_label else "")},
             "template": template_color,
         },
         "elements": elements,
