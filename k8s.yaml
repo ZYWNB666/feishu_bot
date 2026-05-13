@@ -66,7 +66,7 @@ spec:
     spec:
       containers:
         - name: feishu-bot
-          image: harbor.magikcloud.cn/public/feishu_bot:v0.2
+          image: harbor.magikcloud.cn/public/feishu_bot:v0.3
           ports:
             - containerPort: 3100
           envFrom:
