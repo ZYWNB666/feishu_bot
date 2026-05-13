@@ -35,19 +35,6 @@ CREATE TABLE IF NOT EXISTS alert_data (
     group_id VARCHAR(128) DEFAULT NULL COMMENT '发送目标群组ID'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警数据表';
 
--- 升级已存在表（如果表已存在则运行以下语句添加新列）
-USE alert_db;
-ALTER TABLE alert_config
-    ADD COLUMN template_type VARCHAR(16) NOT NULL DEFAULT 'ops' COMMENT '卡片模板类型: ops / biz',
-    ADD COLUMN silence_type VARCHAR(16) NOT NULL DEFAULT 'alertmanager' COMMENT '静默方式: alertmanager / grafana',
-    ADD COLUMN grafana_url VARCHAR(255) DEFAULT NULL COMMENT 'Grafana地址',
-    ADD COLUMN oncall_sync TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'oncall同步开关: 0=使用静态users列表, 1=从Flashcat同步当前oncall人员',
-    ADD COLUMN flashcat_schedule_id VARCHAR(64) DEFAULT NULL COMMENT 'Flashcat排班ID（覆盖全局FLASHCAT_SCHEDULE_ID配置）';
-
-ALTER TABLE alert_data
-    ADD COLUMN message_id VARCHAR(64) DEFAULT NULL COMMENT '飞书消息 ID',
-    ADD COLUMN fingerprints JSON DEFAULT NULL COMMENT '告警指纹列表';
-
 -- 飞书用户表（姓名 → open_id 映射，供 oncall 艾特使用）
 CREATE TABLE IF NOT EXISTS feishu_users (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
