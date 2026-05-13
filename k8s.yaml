@@ -19,8 +19,8 @@ metadata:
 type: Opaque
 stringData:
   # Feishu App
-  APP_ID: "cli_a9a720278879dbb4"
-  APP_SECRET: "26YOsEhHdQ3ms4UP2dtwXfPDA7u1v3jz"
+  APP_ID: ""
+  APP_SECRET: ""
   # Grafana
   GRAFANA_API_KEY: "your-grafana-api-key-here"
   # MySQL（指向 K8s 内部 Service）
