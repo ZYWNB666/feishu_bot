@@ -251,11 +251,9 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         for severity in severities
     )
     if is_phone_alert:
-        # 电话告警：强制获取 oncall 值班人进行艾特
+        # 电话告警：强制获取 oncall 值班人进行艾特（firing 和 resolved 都艾特，但只有 firing 才打电话）
         mentioned_user_list = _get_oncall_mentioned_users(config_row)
-        logger.info("检测到 phone 级别告警，触发电话通知，oncall 艾特用户数 %d", len(mentioned_user_list))
-        # 异步触发电话告警，不阻塞飞书消息发送
-        _trigger_phone_alert_async(data)
+        logger.info("检测到 phone 级别告警，oncall 艾特用户数 %d", len(mentioned_user_list))
     elif severity_matches:
         if config_row.get('oncall_sync'):
             mentioned_user_list = _get_oncall_mentioned_users(config_row)
@@ -278,6 +276,11 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
     all_alerts = data.get('alerts', [])
     is_resolved = all_alerts and all(a.get('status') == 'resolved' for a in all_alerts)
 
+    # phone 级别仅 firing 时触发电话，resolved 不打电话
+    if is_phone_alert and not is_resolved:
+        logger.info("📞 触发电话告警（firing）")
+        _trigger_phone_alert_async(data)
+
     # ---------- resolved 告警：尝试在话题中回复 ----------
     if is_resolved:
         fingerprints = extract_fingerprints(data)
@@ -291,10 +294,10 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         if template_type == 'biz':
             raw_alerts = extract_alert_raw(data)
             common_labels = data.get('commonLabels', {})
-            content = build_biz_resolved_card(alertname, raw_alerts, grafana_urls, common_labels)
+            content = build_biz_resolved_card(alertname, raw_alerts, grafana_urls, common_labels, mentioned_user_list)
         else:
             string_alert_info = _build_alert_message(alerts)
-            content = _build_ops_resolved_content(string_alert_info, alertname)
+            content = _build_ops_resolved_content(string_alert_info, alertname, mentioned_user_list)
 
         if thread_message_id:
             try:
@@ -405,21 +408,27 @@ def _trigger_phone_alert_async(data: dict) -> None:
     t.start()
 
 
-def _build_ops_resolved_content(string_alert_info: str, alertname: str) -> str:
+def _build_ops_resolved_content(string_alert_info: str, alertname: str, mentioned_user_list: list = None) -> str:
     """将 ops 格式告警信息包装成绿色恢复卡片 JSON"""
     import json as _json
     from feishu_utils.event_handler import _get_current_time
+    elements = []
+    if mentioned_user_list:
+        mention_content = " ".join(f'<at id="{uid}"></at>' for uid in mentioned_user_list)
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**📢 通知：** {mention_content}"}})
+        elements.append({"tag": "hr"})
+    elements += [
+        {"tag": "div", "text": {"tag": "lark_md", "content": string_alert_info}},
+        {"tag": "hr"},
+        {"tag": "note", "elements": [{"tag": "plain_text", "content": f"⏰ 发送时间: {_get_current_time()}"}]},
+    ]
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
             "title": {"tag": "plain_text", "content": f"✅ {alertname} 已恢复"},
             "template": "green",
         },
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": string_alert_info}},
-            {"tag": "hr"},
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": f"⏰ 发送时间: {_get_current_time()}"}]},
-        ],
+        "elements": elements,
     }
     return _json.dumps(card, ensure_ascii=False)
 

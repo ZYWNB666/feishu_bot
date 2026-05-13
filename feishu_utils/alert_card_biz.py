@@ -218,6 +218,7 @@ def build_biz_resolved_card(
     raw_alerts: list,
     grafana_urls: dict,
     common_labels: dict,
+    mentioned_user_list: list = None,
 ) -> str:
     """
     构建告警恢复（resolved）飞书卡片 JSON 字符串
@@ -226,9 +227,19 @@ def build_biz_resolved_card(
     :param raw_alerts: extract_alert_raw() 返回的原始 alert 列表
     :param grafana_urls: extract_grafana_urls() 返回的 URL 字典
     :param common_labels: 公共标签字典
+    :param mentioned_user_list: 需要 @ 的 open_id 列表
     :return: str, 序列化好的卡片 JSON
     """
     elements = []
+
+    # @ 用户区域
+    if mentioned_user_list:
+        mention_content = " ".join(f'<at id="{uid}"></at>' for uid in mentioned_user_list)
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**📢 通知：** {mention_content}"},
+        })
+        elements.append({"tag": "hr"})
 
     # 公共标签
     common_display = {k: v for k, v in (common_labels or {}).items() if k != 'alertname'}
