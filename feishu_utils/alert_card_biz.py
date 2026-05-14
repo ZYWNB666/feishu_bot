@@ -130,6 +130,8 @@ def build_biz_firing_card(
         "critical": "red", "warning": "orange", "info": "blue",
         # P 级别
         "p0": "red", "p1": "orange", "p2": "yellow", "p3": "blue",
+        # 电话告警，与 P0 同级
+        "phone": "red",
     }
     template_color = color_map.get(severity.lower(), "orange")
 
@@ -205,6 +207,7 @@ def build_biz_firing_card(
     severity_label_map = {
         "p0": "P0 紧急", "p1": "P1 严重", "p2": "P2 警告", "p3": "P3 提示",
         "critical": "critical", "warning": "warning", "info": "info",
+        "phone": "P0 紧急",
     }
     severity_label = severity_label_map.get(severity.lower(), severity) if severity else ""
 
