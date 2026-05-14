@@ -146,8 +146,8 @@ def build_biz_firing_card(
         })
         elements.append({"tag": "hr"})
 
-    # 公共标签（过滤 alertname / grafana_folder / severity）
-    _label_blacklist = {'alertname', 'grafana_folder', 'severity'}
+    # 公共标签（过滤 alertname / grafana_folder / severity / alertid）
+    _label_blacklist = {'alertname', 'grafana_folder', 'severity', 'alertid'}
     common_display = {k: v for k, v in (common_labels or {}).items() if k not in _label_blacklist}
     if common_display:
         field_items = [{"is_short": True, "text": {"tag": "lark_md", "content": f"**{k}**\n{v}"}}
@@ -250,8 +250,8 @@ def build_biz_resolved_card(
         })
         elements.append({"tag": "hr"})
 
-    # 公共标签
-    common_display = {k: v for k, v in (common_labels or {}).items() if k != 'alertname'}
+    # 公共标签（过滤 alertname / alertid）
+    common_display = {k: v for k, v in (common_labels or {}).items() if k not in ('alertname', 'alertid')}
     if common_display:
         field_items = [{"is_short": True, "text": {"tag": "lark_md", "content": f"**{k}**\n{v}"}}
                        for k, v in common_display.items()]
