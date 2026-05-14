@@ -205,9 +205,9 @@ def build_biz_firing_card(
 
     # 标题中显示的级别标签（P 级别显示为更直观的名称）
     severity_label_map = {
-        "p0": "P0 紧急", "p1": "P1 严重", "p2": "P2 警告", "p3": "P3 提示",
+        "p0": "P0", "p1": "P1", "p2": "P2", "p3": "P3",
         "critical": "critical", "warning": "warning", "info": "info",
-        "phone": "P0 紧急",
+        "phone": "P0",
     }
     severity_label = severity_label_map.get(severity.lower(), severity) if severity else ""
 
