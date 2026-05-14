@@ -313,12 +313,38 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': bool(message_id)}
 
     # ---------- firing 告警 ----------
+    # 检测是否为混合状态（部分实例已恢复 + 部分仍 firing）
+    # 混合状态时应回复到原始告警话题，而非创建新独立消息
+    has_any_resolved = any(a.get('status') == 'resolved' for a in all_alerts)
+    thread_message_id_for_mixed = ''
+    if has_any_resolved:
+        fingerprints = extract_fingerprints(data)
+        for fp in fingerprints:
+            mid = get_message_id_by_fingerprint(fp, group_id=group_id)
+            if mid:
+                thread_message_id_for_mixed = mid
+                break
+
     if template_type == 'biz':
         raw_alerts = extract_alert_raw(data)
         common_labels = data.get('commonLabels', {})
         content = build_biz_firing_card(
             alertname, alert_severity, raw_alerts, grafana_urls, maid, common_labels, mentioned_user_list
         )
+        if thread_message_id_for_mixed:
+            try:
+                feishu_client.reply_message(thread_message_id_for_mixed, 'interactive', content, reply_in_thread=True)
+                logger.info("🔀 混合状态已在话题中回复，原消息: %s", thread_message_id_for_mixed)
+                if maid:
+                    update_message_id(maid, thread_message_id_for_mixed)
+                return {
+                    'alert_id': config_row.get('alert_id'),
+                    'group_id': group_id,
+                    'message_id': thread_message_id_for_mixed,
+                    'success': True,
+                }
+            except Exception as e:
+                logger.warning("混合状态话题回复失败，降级为新消息: %s", e)
         try:
             message_id = feishu_client.send("chat_id", group_id, "interactive", content)
         except Exception as e:

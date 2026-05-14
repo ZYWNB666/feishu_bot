@@ -137,10 +137,16 @@ def handle_message_received(feishu_client, event_data):
         # 检查是否有@机器人
         mentions = message.get("mentions", [])
 
-        # 群聊中只响应被@的消息，私聊不限制
-        if chat_type == "group" and not mentions:
-            logger.debug("群聊消息未@机器人，忽略")
-            return True
+        # 群聊中只响应被@机器人自身的消息，私聊不限制
+        if chat_type == "group":
+            bot_open_id = feishu_client.get_bot_open_id()
+            bot_mentioned = any(
+                m.get("id", {}).get("open_id") == bot_open_id
+                for m in mentions
+            ) if bot_open_id else bool(mentions)
+            if not bot_mentioned:
+                logger.debug("群聊消息未@机器人，忽略")
+                return True
         
         # 解析命令（去除@内容）
         # 如果消息以@开头，提取实际的命令文本

@@ -29,6 +29,7 @@ class FeishuApiClient:
         self._app_secret = app_secret
         self._lark_host = lark_host
         self._tenant_access_token = ""
+        self._bot_open_id = ""  # 懒加载缓存 bot 自身的 open_id
     
     @property
     def tenant_access_token(self):
@@ -86,6 +87,24 @@ class FeishuApiClient:
         logger.info("消息发送成功, message_id=%s", message_id)
         return message_id
     
+    def get_bot_open_id(self) -> str:
+        """获取 bot 自身的 open_id（结果缓存，避免重复请求）"""
+        if self._bot_open_id:
+            return self._bot_open_id
+        try:
+            self._authorize_tenant_access_token()
+            url = f"{self._lark_host}/open-apis/bot/v3/info"
+            headers = {
+                "Authorization": f"Bearer {self._tenant_access_token}",
+            }
+            resp = requests.get(url, headers=headers, timeout=10)
+            data = resp.json()
+            self._bot_open_id = (data.get('bot') or {}).get('open_id', '')
+            logger.info("Bot open_id: %s", self._bot_open_id)
+        except Exception as e:
+            logger.warning("获取 bot open_id 失败: %s", e)
+        return self._bot_open_id
+
     def reply_message(self, message_id, msg_type, content, reply_in_thread: bool = False):
         """
         回复消息
