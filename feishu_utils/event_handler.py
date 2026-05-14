@@ -161,6 +161,8 @@ def handle_message_received(feishu_client, event_data):
         # 分割命令和参数
         parts = command_text.split()
         if not parts:
+            # 群聊中只 @ 了 bot 没有命令，静默
+            logger.debug("消息去除 @ 后为空，忽略")
             return True
         
         command = parts[0].lower()
@@ -397,8 +399,7 @@ def handle_message_received(feishu_client, event_data):
                 reply_content = json.dumps(error_card)
                 feishu_client.reply_message(message_id, "interactive", reply_content)
             
-        else:
-            # 构建卡片消息（支持 Markdown）
+        elif command == "help":
             card_data = {
                 "config": {
                     "wide_screen_mode": True
@@ -420,12 +421,12 @@ def handle_message_received(feishu_client, event_data):
                     }
                 ]
             }
-            
-            # 使用引用回复（卡片消息）
             reply_content = json.dumps(card_data)
             feishu_client.reply_message(message_id, "interactive", reply_content)
             logger.info("已回复help命令给用户 %s", sender_id)
-            logger.debug("收到未知命令: %s", command)
+        else:
+            # 群聊中未命中任何功能，静默不回复
+            logger.debug("未知命令 '%s'，群聊中静默处理", command)
         
         return True
         

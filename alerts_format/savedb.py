@@ -127,13 +127,11 @@ def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
         row = cursor.fetchone()
         if row and row[0]:
             val = row[0]
-            # MySQL DATETIME 返回 naive datetime，实际存储的是北京时间（UTC+8）
-            # 需转换为 UTC，与 Grafana endsAt（UTC）保持一致，避免时长计算偏差 8 小时
-            if hasattr(val, 'isoformat'):
-                if val.tzinfo is None:
-                    beijing_tz = pytz.timezone('Asia/Shanghai')
-                    val = beijing_tz.localize(val).astimezone(pytz.utc)
-                return val.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            # DB 存储的是北京时间（save_dbdata 用 beijing_time 写入）
+            # Grafana endsAt 同样是北京时间（Grafana 时区为 Asia/Shanghai，但加了假 Z 后缀）
+            # 两边都是 naive 北京时间，直接返回不做时区转换，保持一致
+            if hasattr(val, 'strftime'):
+                return val.strftime('%Y-%m-%dT%H:%M:%SZ')
             return str(val)
         return ''
     except Error as e:
