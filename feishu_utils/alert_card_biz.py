@@ -15,9 +15,15 @@ def _parse_ts(ts: str) -> datetime | None:
     """解析 alertmanager ISO 时间字符串"""
     if not ts:
         return None
-    for fmt in ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S%z'):
+    for fmt in ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S%z',
+                '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'):
         try:
-            dt = datetime.strptime(ts[:26] + 'Z' if '.' in ts else ts, fmt)
+            # 处理带毫秒且末尾有 Z 的格式：直接去掉末尾 Z 再加回来，避免双 Z 问题
+            if fmt.endswith('.%fZ'):
+                clean = ts.rstrip('Z')
+                dt = datetime.strptime(clean[:26], fmt[:-1])
+            else:
+                dt = datetime.strptime(ts, fmt)
             return dt
         except ValueError:
             continue

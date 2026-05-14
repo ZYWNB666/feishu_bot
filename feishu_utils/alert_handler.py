@@ -55,7 +55,7 @@ from alerts_format.db_utils import (
     get_alert_config_by_labels,
     get_alert_config_by_alertid
 )
-from alerts_format.savedb import update_message_id, get_message_id_by_fingerprint
+from alerts_format.savedb import update_message_id, get_message_id_by_fingerprint, get_alerttime_by_fingerprint
 from feishu_utils.event_handler import alert_to_feishu
 from feishu_utils.alert_card_biz import build_biz_firing_card, build_biz_resolved_card
 
@@ -293,6 +293,14 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
 
         if template_type == 'biz':
             raw_alerts = extract_alert_raw(data)
+            # 用 DB 中存储的实际触发时间覆盖 Grafana resolved 包中的 startsAt
+            # （Grafana 在 resolved 通知里会将 startsAt 重置为恢复时间，导致持续时长为 0）
+            for ra in raw_alerts:
+                fp = ra.get('fingerprint', '')
+                if fp:
+                    db_start = get_alerttime_by_fingerprint(fp, group_id=group_id)
+                    if db_start:
+                        ra['startsAt'] = db_start
             common_labels = data.get('commonLabels', {})
             content = build_biz_resolved_card(alertname, raw_alerts, grafana_urls, common_labels, mentioned_user_list)
         else:

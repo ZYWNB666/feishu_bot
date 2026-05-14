@@ -101,6 +101,50 @@ def update_message_id(maid: str, message_id: str) -> None:
             connection.close()
 
 
+def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
+    """通过 fingerprint（+可选 group_id）查找对应告警的 alerttime（ISO 字符串，取最新一条）"""
+    if not fingerprint:
+        return ''
+    connection = None
+    try:
+        db_config = config.get_alert_db_config()
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor()
+        if group_id:
+            cursor.execute(
+                "SELECT alerttime FROM alert_data "
+                "WHERE JSON_CONTAINS(fingerprints, %s) AND group_id = %s "
+                "ORDER BY alerttime ASC LIMIT 1",
+                (json.dumps(fingerprint), group_id)
+            )
+        else:
+            cursor.execute(
+                "SELECT alerttime FROM alert_data "
+                "WHERE JSON_CONTAINS(fingerprints, %s) "
+                "ORDER BY alerttime ASC LIMIT 1",
+                (json.dumps(fingerprint),)
+            )
+        row = cursor.fetchone()
+        if row and row[0]:
+            val = row[0]
+            # MySQL DATETIME 返回 naive datetime，实际存储的是北京时间（UTC+8）
+            # 需转换为 UTC，与 Grafana endsAt（UTC）保持一致，避免时长计算偏差 8 小时
+            if hasattr(val, 'isoformat'):
+                if val.tzinfo is None:
+                    beijing_tz = pytz.timezone('Asia/Shanghai')
+                    val = beijing_tz.localize(val).astimezone(pytz.utc)
+                return val.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z'
+            return str(val)
+        return ''
+    except Error as e:
+        logger.error("查询 alerttime 失败: %s", e)
+        return ''
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+
 def get_message_id_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
     """通过 fingerprint（+可选 group_id）查找对应告警的飞书消息 ID（取最新一条）"""
     if not fingerprint:
