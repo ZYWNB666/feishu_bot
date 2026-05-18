@@ -15,10 +15,24 @@ logger = logging.getLogger(__name__)
 def save_dbdata(post_data, project, group_id=None):
     json_data = [post_data]
 
-    utc_now = datetime.datetime.now(pytz.utc)
-    beijing_time = utc_now.astimezone(pytz.timezone('Asia/Shanghai'))
-    iso_format = beijing_time.isoformat()
-    startsAtTime = iso_format[:23] + "Z"
+    # 使用 Grafana 发送的最早 startsAt（UTC）作为 alerttime
+    # （而非 bot 收到时的北京墙钟），保证与 Grafana endsAt 时区一致，持续时长计算准确
+    min_starts_at = None
+    for alert in post_data.get('alerts', []):
+        if alert.get('status') == 'resolved':
+            continue
+        sa = alert.get('startsAt', '')
+        # 过滤无效占位时间
+        if sa and sa != '0001-01-01T00:00:00Z':
+            if min_starts_at is None or sa < min_starts_at:
+                min_starts_at = sa
+    if min_starts_at:
+        startsAtTime = min_starts_at
+    else:
+        # 备用：如果 Grafana 没有发 startsAt 则用当前 UTC
+        utc_now = datetime.datetime.now(pytz.utc)
+        startsAtTime = utc_now.strftime('%Y-%m-%dT%H:%M:%SZ')
+
     random_number = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(20))
 
     matchers = []
@@ -114,22 +128,21 @@ def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
             cursor.execute(
                 "SELECT alerttime FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) AND group_id = %s "
-                "ORDER BY alerttime ASC LIMIT 1",
+                "ORDER BY alerttime DESC LIMIT 1",
                 (json.dumps(fingerprint), group_id)
             )
         else:
             cursor.execute(
                 "SELECT alerttime FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) "
-                "ORDER BY alerttime ASC LIMIT 1",
+                "ORDER BY alerttime DESC LIMIT 1",
                 (json.dumps(fingerprint),)
             )
         row = cursor.fetchone()
         if row and row[0]:
             val = row[0]
-            # DB 存储的是北京时间（save_dbdata 用 beijing_time 写入）
-            # Grafana endsAt 同样是北京时间（Grafana 时区为 Asia/Shanghai，但加了假 Z 后缀）
-            # 两边都是 naive 北京时间，直接返回不做时区转换，保持一致
+            # DB alerttime 现在存的是 Grafana 原始 UTC startsAt
+            # MySQL DATETIME 返回 naive datetime，数字就是 UTC 值，直接格式化返回即可
             if hasattr(val, 'strftime'):
                 return val.strftime('%Y-%m-%dT%H:%M:%SZ')
             return str(val)
