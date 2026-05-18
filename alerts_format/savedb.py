@@ -116,7 +116,7 @@ def update_message_id(maid: str, message_id: str) -> None:
 
 
 def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
-    """通过 fingerprint（+可选 group_id）查找对应告警的 alerttime（ISO 字符串，取最新一条）"""
+    """通过 fingerprint（+可选 group_id）查找对应告警的 alerttime（ISO 字符串，取最早一条触发时间用于计算时长）"""
     if not fingerprint:
         return ''
     connection = None
@@ -128,14 +128,14 @@ def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
             cursor.execute(
                 "SELECT alerttime FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) AND group_id = %s "
-                "ORDER BY alerttime DESC LIMIT 1",
+                "ORDER BY id ASC LIMIT 1",
                 (json.dumps(fingerprint), group_id)
             )
         else:
             cursor.execute(
                 "SELECT alerttime FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) "
-                "ORDER BY alerttime DESC LIMIT 1",
+                "ORDER BY id ASC LIMIT 1",
                 (json.dumps(fingerprint),)
             )
         row = cursor.fetchone()
@@ -157,7 +157,7 @@ def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
 
 
 def get_message_id_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
-    """通过 fingerprint（+可选 group_id）查找对应告警的飞书消息 ID（取最新一条）"""
+    """通过 fingerprint（+可选 group_id）查找对应告警的飞书消息 ID（取最新记录，即最后一次告警对应的话题）"""
     if not fingerprint:
         return ''
     connection = None
@@ -169,14 +169,14 @@ def get_message_id_by_fingerprint(fingerprint: str, group_id: str = None) -> str
             cursor.execute(
                 "SELECT message_id FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) AND message_id IS NOT NULL AND group_id = %s "
-                "ORDER BY alerttime DESC LIMIT 1",
+                "ORDER BY id DESC LIMIT 1",
                 (json.dumps(fingerprint), group_id)
             )
         else:
             cursor.execute(
                 "SELECT message_id FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) AND message_id IS NOT NULL "
-                "ORDER BY alerttime DESC LIMIT 1",
+                "ORDER BY id DESC LIMIT 1",
                 (json.dumps(fingerprint),)
             )
         row = cursor.fetchone()
