@@ -128,14 +128,14 @@ def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
             cursor.execute(
                 "SELECT alerttime FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) AND group_id = %s "
-                "ORDER BY id ASC LIMIT 1",
+                "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
                 (json.dumps(fingerprint), group_id)
             )
         else:
             cursor.execute(
                 "SELECT alerttime FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) "
-                "ORDER BY id ASC LIMIT 1",
+                "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
                 (json.dumps(fingerprint),)
             )
         row = cursor.fetchone()
@@ -169,14 +169,14 @@ def get_message_id_by_fingerprint(fingerprint: str, group_id: str = None) -> str
             cursor.execute(
                 "SELECT message_id FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) AND message_id IS NOT NULL AND group_id = %s "
-                "ORDER BY id DESC LIMIT 1",
+                "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
                 (json.dumps(fingerprint), group_id)
             )
         else:
             cursor.execute(
                 "SELECT message_id FROM alert_data "
                 "WHERE JSON_CONTAINS(fingerprints, %s) AND message_id IS NOT NULL "
-                "ORDER BY id DESC LIMIT 1",
+                "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
                 (json.dumps(fingerprint),)
             )
         row = cursor.fetchone()

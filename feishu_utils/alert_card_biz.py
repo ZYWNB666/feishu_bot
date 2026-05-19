@@ -155,9 +155,11 @@ def build_biz_firing_card(
         elements.append({"tag": "div", "fields": field_items})
         elements.append({"tag": "hr"})
 
-    # 每条 alert 详情
+    # 每条 alert 详情（只展示仍在 firing 的实例，resolved 实例不污染 firing 卡片）
     for alert in raw_alerts:
-        status_icon = "🔥" if alert.get('status') == 'firing' else "✅"
+        if alert.get('status') != 'firing':
+            continue
+        status_icon = "🔥"
         # 特有标签
         spec_labels = alert.get('labels', {})
         if spec_labels:

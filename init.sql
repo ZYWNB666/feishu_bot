@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS alert_data (
     silenceid JSON DEFAULT NULL COMMENT '静默ID列表(JSON)',
     message_id VARCHAR(64) DEFAULT NULL COMMENT '飞书消息 ID，用于话题回复',
     fingerprints JSON DEFAULT NULL COMMENT '告警指纹列表(JSON数组)，用于 resolved 反查',
-    group_id VARCHAR(128) DEFAULT NULL COMMENT '发送目标群组ID'
+    group_id VARCHAR(128) DEFAULT NULL COMMENT '发送目标群组ID',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间，用于按插入顺序排序'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警数据表';
 
 -- 飞书用户表（姓名 → open_id 映射，供 oncall 艾特使用）
