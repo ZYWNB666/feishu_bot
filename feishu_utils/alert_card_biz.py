@@ -91,20 +91,6 @@ def _grafana_buttons(grafana_urls: dict, maid: str = None) -> dict | None:
     return {"tag": "action", "actions": actions} if actions else None
 
 
-def _label_fields(labels: dict) -> list:
-    """将 labels dict 转换为双列 fields 元素"""
-    if not labels:
-        return []
-    fields = []
-    for k, v in labels.items():
-        fields.append({
-            "tag": "plain_text",
-            "content": f"{k}: {v}",
-        })
-    # 双列布局
-    return [{"tag": "div", "fields": fields}]
-
-
 def build_biz_firing_card(
     alertname: str,
     severity: str,
@@ -156,9 +142,11 @@ def build_biz_firing_card(
         elements.append({"tag": "hr"})
 
     # 每条 alert 详情（只展示仍在 firing 的实例，resolved 实例不污染 firing 卡片）
-    for alert in raw_alerts:
-        if alert.get('status') != 'firing':
-            continue
+    firing_alerts = [a for a in raw_alerts if a.get('status') == 'firing']
+    if not firing_alerts:
+        # 没有 firing 实例，不应进入此函数，返回空字符串由调用方跳过
+        return ''
+    for alert in firing_alerts:
         status_icon = "🔥"
         # 特有标签
         spec_labels = alert.get('labels', {})

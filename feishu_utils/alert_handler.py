@@ -12,25 +12,42 @@ import time
 
 from config.config import Config
 
-# ── 告警去重缓存（基于 fingerprint+status 哈希，30 秒 TTL）──
+# ── 告警去重缓存（基于 fingerprint+status 哈希，5 分钟 TTL）──
 _alert_dedup_cache: dict[str, float] = {}
 _alert_dedup_lock = threading.Lock()
-_ALERT_DEDUP_TTL = 30  # 秒
+_ALERT_DEDUP_TTL = 300  # 秒（5分钟）：防止 Grafana repeat_interval 重复投递同一告警
 
 
 
 def _make_dedup_key(data: dict) -> str:
-    """用所有 alert 的 fingerprint+status 生成去重 key"""
+    """用所有 firing alert 的 fingerprint 生成去重 key（仅用于 firing 批次）"""
     pairs = sorted(
-        (a.get('fingerprint', ''), a.get('status', ''))
+        a.get('fingerprint', '')
         for a in data.get('alerts', [])
+        if a.get('status') == 'firing'
     )
     raw = json.dumps(pairs, ensure_ascii=False, sort_keys=True)
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+def _is_all_resolved(data: dict) -> bool:
+    """判断是否为纯 resolved 批次"""
+    alerts = data.get('alerts', [])
+    return bool(alerts) and all(a.get('status') == 'resolved' for a in alerts)
+
+
+def _clear_dedup_for_resolved(data: dict) -> None:
+    """resolved 批次到来时，清除对应 fingerprint 组合的 firing 去重缓存
+    防止 firing→resolved→firing 在 5 分钟内第二次 firing 被拦截"""
+    # 用 resolved 批次的 fingerprint 重建一个假设的 firing key——即如果这些指纹全部 firing 时的 key
+    pairs = sorted(a.get('fingerprint', '') for a in data.get('alerts', []))
+    raw = json.dumps(pairs, ensure_ascii=False, sort_keys=True)
+    key = hashlib.md5(raw.encode()).hexdigest()
+    with _alert_dedup_lock:
+        _alert_dedup_cache.pop(key, None)
+
+
 def _is_duplicate(key: str) -> bool:
-    """如果 key 在 TTL 内已处理过则返回 True，否则记录并返回 False"""
     now = time.time()
     with _alert_dedup_lock:
         # 清理过期记录
@@ -79,11 +96,16 @@ def process_alert_request(data, feishu_client):
             logger.error("请求体不能为空")
             return {"code": 400, "msg": "请求体不能为空"}, 400
 
-        # 去重：30 秒内相同 fingerprint 组合只处理一次
-        dedup_key = _make_dedup_key(data)
-        if _is_duplicate(dedup_key):
-            logger.info("告警重复，已跳过 (dedup_key=%s)", dedup_key)
-            return {"code": 0, "msg": "duplicate, skipped"}, 200
+        # 去重：resolved 告警永不去重（避免漏掉恢复通知）
+        # resolved 到来时清除对应 fingerprint 的 firing 缓存，防止 firing→resolved→firing 内 5 分钟漏第二次 firing
+        # firing 告警：5 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递）
+        if _is_all_resolved(data):
+            _clear_dedup_for_resolved(data)
+        else:
+            dedup_key = _make_dedup_key(data)
+            if _is_duplicate(dedup_key):
+                logger.info("告警重复，已跳过 (dedup_key=%s)", dedup_key)
+                return {"code": 0, "msg": "duplicate, skipped"}, 200
 
         # 查找匹配的告警配置
         configs = _find_alert_configs(data)
@@ -270,7 +292,6 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
     # 判断模板类型（默认 ops）
     template_type = config_row.get('template_type', 'ops')
     group_id = config_row['group_id']
-    grafana_url_cfg = config_row.get('grafana_url') or ''
 
     # 判断是否为 resolved 告警（所有 alert 都是 resolved）
     all_alerts = data.get('alerts', [])
@@ -330,6 +351,9 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         content = build_biz_firing_card(
             alertname, alert_severity, raw_alerts, grafana_urls, maid, common_labels, mentioned_user_list
         )
+        if not content:
+            logger.info("biz firing 卡片无 firing 实例，跳过发送 group_id=%s", group_id)
+            return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': True}
         try:
             message_id = feishu_client.send("chat_id", group_id, "interactive", content)
         except Exception as e:
