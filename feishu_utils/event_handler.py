@@ -463,6 +463,8 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
             "p1": "orange",
             "p2": "yellow",
             "p3": "blue",
+            # 电话告警，与 P0 同级
+            "phone": "red",
         }
         template_color = color_map.get(severity.lower(), "orange")
         

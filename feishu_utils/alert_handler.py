@@ -525,6 +525,8 @@ def _determine_alert_severity(severities):
         "p1": 4,
         "p2": 3,
         "p3": 2,
+        # 电话告警，与 p0 同优先级
+        "phone": 5,
     }
     
     alert_severity = "warning"  # 默认级别
