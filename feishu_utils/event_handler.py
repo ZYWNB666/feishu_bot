@@ -467,9 +467,17 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
             "phone": "red",
         }
         template_color = color_map.get(severity.lower(), "orange")
-        
+
+        # 标题中的级别标签
+        severity_label_map = {
+            "p0": "P0", "p1": "P1", "p2": "P2", "p3": "P3",
+            "critical": "critical", "warning": "warning", "info": "info",
+            "phone": "Phone",
+        }
+        severity_label = severity_label_map.get(severity.lower(), "") if severity else ""
+
         # 构建标题（使用 alertname）
-        title_content = f"🔔 {alertname}"
+        title_content = f"🔔 {alertname}" + (f"  [{severity_label}]" if severity_label else "")
         
         # 构建卡片元素列表
         elements = []

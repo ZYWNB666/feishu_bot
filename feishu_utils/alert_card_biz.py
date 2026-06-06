@@ -197,7 +197,7 @@ def build_biz_firing_card(
     severity_label_map = {
         "p0": "P0", "p1": "P1", "p2": "P2", "p3": "P3",
         "critical": "critical", "warning": "warning", "info": "info",
-        "phone": "P0",
+        "phone": "Phone",
     }
     severity_label = severity_label_map.get(severity.lower(), severity) if severity else ""
 
