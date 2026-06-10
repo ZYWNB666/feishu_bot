@@ -79,6 +79,27 @@ from feishu_utils.alert_card_biz import build_biz_firing_card, build_biz_resolve
 logger = logging.getLogger(__name__)
 
 
+def _split_by_alert(data: dict) -> list:
+    """
+    将批量 payload 拆分为单条 alert 的子 payload 列表，用于独立路由。
+
+    当 Grafana 将多个不同 tenant 的告警打包到同一批次时，commonLabels 中不含 tenant，
+    导致 extract_all_labels 只能取第一条 alert 的 tenant 进行路由，造成路由错误。
+    拆分后每条 alert 独立路由，避免被错误投递到其他群组。
+    """
+    alerts = data.get('alerts', [])
+    if len(alerts) <= 1:
+        return [data]
+    sub_payloads = []
+    for alert in alerts:
+        sub = dict(data)
+        sub['alerts'] = [alert]
+        # 用该 alert 自身的 labels 覆盖 commonLabels，保证路由时拿到正确的 tenant 等标签
+        sub['commonLabels'] = {k: v for k, v in alert.get('labels', {}).items()}
+        sub_payloads.append(sub)
+    return sub_payloads
+
+
 def process_alert_request(data, feishu_client):
     """
     处理告警请求
@@ -95,6 +116,28 @@ def process_alert_request(data, feishu_client):
         if not data:
             logger.error("请求体不能为空")
             return {"code": 400, "msg": "请求体不能为空"}, 400
+
+        # 若批次中含多条来自不同 tenant 的 alert，拆分为单条子 payload 分别路由
+        sub_payloads = _split_by_alert(data)
+        if len(sub_payloads) > 1:
+            logger.info("批次含 %d 条 alert，拆分后独立路由", len(sub_payloads))
+            all_responses = []
+            all_failed = 0
+            all_total = 0
+            for sub in sub_payloads:
+                resp, _ = process_alert_request(sub, feishu_client)
+                summary = resp.get('summary', {})
+                all_total += summary.get('total', 1)
+                all_failed += summary.get('failed', 0)
+                if 'data' in resp:
+                    all_responses.extend(resp['data'])
+            success_count = all_total - all_failed
+            return {
+                "code": 0,
+                "msg": "success" if all_failed == 0 else f"部分成功 ({success_count}/{all_total})",
+                "data": all_responses,
+                "summary": {"total": all_total, "success": success_count, "failed": all_failed}
+            }, 200
 
         # 去重：resolved 告警永不去重（避免漏掉恢复通知）
         # resolved 到来时清除对应 fingerprint 的 firing 缓存，防止 firing→resolved→firing 内 5 分钟漏第二次 firing
