@@ -8,7 +8,6 @@ import logging
 import threading
 import time
 from datetime import datetime
-import pytz
 import mysql.connector
 
 from alerts_format.ma import macreate, madelete
@@ -22,10 +21,8 @@ _callback_cache_lock = threading.Lock()
 
 
 def _get_current_time():
-    """获取当前时间字符串"""
-    beijing_tz = pytz.timezone('Asia/Shanghai')
-    now = datetime.now(beijing_tz)
-    return now.strftime('%Y-%m-%d %H:%M:%S')
+    """获取当前时间字符串（容器已配置上海时区，直接用本地时间）"""
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
 def _get_silence_config_by_maid(maid: str) -> dict:

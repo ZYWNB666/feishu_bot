@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 
 import mysql.connector
 import requests
-import pytz
 
 from config.config import Config
 
@@ -110,9 +109,9 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
     if not matchers_list:
         return {"success": False, "message": "该告警无 matchers 数据"}
 
-    utc_now = datetime.now(pytz.utc)
-    starts_at = utc_now.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
-    ends_at = (utc_now + timedelta(hours=duration_hours)).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+    now = datetime.now().astimezone()
+    starts_at = now.isoformat(timespec='milliseconds')
+    ends_at = (now + timedelta(hours=duration_hours)).isoformat(timespec='milliseconds')
 
     headers = {
         "Content-Type": "application/json",

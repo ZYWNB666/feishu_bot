@@ -4,7 +4,6 @@ import mysql.connector
 from mysql.connector import Error
 import string
 import datetime
-import pytz
 import logging
 
 from config import config
@@ -15,8 +14,7 @@ logger = logging.getLogger(__name__)
 def save_dbdata(post_data, project, group_id=None):
     json_data = [post_data]
 
-    # 使用 Grafana 发送的最早 startsAt（UTC）作为 alerttime
-    # （而非 bot 收到时的北京墙钟），保证与 Grafana endsAt 时区一致，持续时长计算准确
+    # 使用 Grafana 发送的最早 startsAt（已配置为上海时区），直接使用原始值不做转换
     min_starts_at = None
     for alert in post_data.get('alerts', []):
         if alert.get('status') == 'resolved':
@@ -29,9 +27,8 @@ def save_dbdata(post_data, project, group_id=None):
     if min_starts_at:
         startsAtTime = min_starts_at
     else:
-        # 备用：如果 Grafana 没有发 startsAt 则用当前 UTC
-        utc_now = datetime.datetime.now(pytz.utc)
-        startsAtTime = utc_now.strftime('%Y-%m-%dT%H:%M:%SZ')
+        # 备用：如果 Grafana 没有发 startsAt 则用当前本地时间（容器已配置上海时区）
+        startsAtTime = datetime.datetime.now().astimezone().isoformat()
 
     random_number = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(20))
 
@@ -141,10 +138,10 @@ def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
         row = cursor.fetchone()
         if row and row[0]:
             val = row[0]
-            # DB alerttime 现在存的是 Grafana 原始 UTC startsAt
-            # MySQL DATETIME 返回 naive datetime，数字就是 UTC 值，直接格式化返回即可
+            # DB alerttime 存的是 Grafana 原始 startsAt（上海时区）
+            # MySQL DATETIME 返回 naive datetime，直接格式化返回即可
             if hasattr(val, 'strftime'):
-                return val.strftime('%Y-%m-%dT%H:%M:%SZ')
+                return val.strftime('%Y-%m-%dT%H:%M:%S')
             return str(val)
         return ''
     except Error as e:

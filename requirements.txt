@@ -14,8 +14,5 @@ pycryptodome==3.19.0
 # MySQL数据库连接
 mysql-connector-python==8.2.0
 
-# 时区处理
-pytz==2024.1
-
 # 飞书官方 SDK（WebSocket 长连接 / OpenAPI 调用）
 lark-oapi>=1.6.2

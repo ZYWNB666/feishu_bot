@@ -1,6 +1,5 @@
 import json
 from datetime import datetime, timedelta
-import pytz
 import mysql.connector
 import requests
 import logging
@@ -151,13 +150,11 @@ def macreate(maid, matime):
                 matchers_list = alertlabels_dict.get('matchers', [])
                 logger.info(f"开始创建静默规则，共 {len(matchers_list)} 个告警")
 
-                utc_now = datetime.now(pytz.utc)
-                iso_format = utc_now.isoformat()
-                startsAttime = iso_format[0:23] + "Z"
+                now = datetime.now().astimezone()
+                startsAttime = now.isoformat()
 
-                end_utc_now = utc_now + timedelta(hours=matime_hours)
-                end_iso_format = end_utc_now.isoformat()
-                endsAttime = end_iso_format[0:23] + "Z"
+                end_now = now + timedelta(hours=matime_hours)
+                endsAttime = end_now.isoformat()
 
                 silence_id_list = []  # 创建一个列表来存储所有的silenceID
 
