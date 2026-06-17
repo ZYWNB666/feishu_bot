@@ -371,18 +371,30 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             string_alert_info = _build_alert_message(alerts)
             content = _build_ops_resolved_content(string_alert_info, alertname, mentioned_user_list)
 
-        if thread_message_id:
-            try:
-                feishu_client.reply_message(thread_message_id, 'interactive', content, reply_in_thread=True)
-                logger.info("✅ 已在话题中回复恢复通知，原消息: %s", thread_message_id)
-                return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': True}
-            except Exception as e:
-                logger.warning("话题回复失败，降级为新消息: %s", e)
+        if not thread_message_id:
+            # 找不到源消息，无法在话题中回复，跳过不发送
+            logger.warning("⚠️ 未找到源消息，跳过恢复告警通知 group_id=%s fingerprints=%s", group_id, fingerprints)
+            return {
+                'alert_id': config_row.get('alert_id'),
+                'group_id': group_id,
+                'success': True,
+                'skipped': True,
+                'reason': '未找到源消息，无法在话题中回复',
+            }
 
-        # 无 thread_message_id 或回复失败时，发新消息
-        message_id = feishu_client.send("chat_id", group_id, "interactive", content)
-        logger.info("✅ 发送恢复通知（新消息）group_id=%s message_id=%s", group_id, message_id)
-        return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': bool(message_id)}
+        try:
+            feishu_client.reply_message(thread_message_id, 'interactive', content, reply_in_thread=True)
+            logger.info("✅ 已在话题中回复恢复通知，原消息: %s", thread_message_id)
+            return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': True}
+        except Exception as e:
+            # 话题回复失败，不降级为新消息，避免恢复通知脱离上下文
+            logger.error("❌ 话题回复失败，跳过恢复告警通知: %s", e)
+            return {
+                'alert_id': config_row.get('alert_id'),
+                'group_id': group_id,
+                'success': False,
+                'error': f'话题回复失败: {e}',
+            }
 
     # ---------- firing 告警（含混合状态）----------
     # firing 告警永远发新消息，不回复旧话题。
