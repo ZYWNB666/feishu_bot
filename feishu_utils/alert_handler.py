@@ -12,11 +12,15 @@ import time
 
 from config.config import Config
 
-# ── 告警去重缓存（基于 fingerprint+status 哈希，5 分钟 TTL）──
+# ── 告警去重缓存（基于 fingerprint+status 哈希）──
 _alert_dedup_cache: dict[str, float] = {}
 _alert_dedup_lock = threading.Lock()
-_ALERT_DEDUP_TTL = 300  # 秒（5分钟）：防止 Grafana repeat_interval 重复投递同一告警
+_ALERT_DEDUP_TTL = 300  # 秒（5分钟）：防止 Grafana repeat_interval 重复投递同一 firing 告警
 
+# ── resolved 去重缓存（30 分钟 TTL，覆盖多个 Grafana repeat_interval 周期）──
+_resolved_dedup_cache: dict[str, float] = {}
+_resolved_dedup_lock = threading.Lock()
+_RESOLVED_DEDUP_TTL = 1800  # 秒（30分钟）：防止 Grafana repeat_interval 重复投递同一 resolved 告警
 
 
 def _make_dedup_key(data: dict) -> str:
@@ -31,9 +35,20 @@ def _make_dedup_key(data: dict) -> str:
 
 
 def _is_all_resolved(data: dict) -> bool:
-    """判断是否为纯 resolved 批次"""
+    """判断是否为纯 resolved 批次。
+
+    关键：必须同时满足两个条件：
+    1. 原始顶层 status='resolved'（Grafana 主动发送的恢复通知）
+    2. 所有 alert 的 status 都是 resolved
+
+    当 Grafana 未开启恢复通知时，顶层 status='firing'，即使批次中混有 resolved
+    实例（或拆分后产生的 resolved 子批次），也不应触发恢复通知路径。
+    """
+    original_status = data.get('_original_status', data.get('status', ''))
     alerts = data.get('alerts', [])
-    return bool(alerts) and all(a.get('status') == 'resolved' for a in alerts)
+    return (original_status == 'resolved'
+            and bool(alerts)
+            and all(a.get('status') == 'resolved' for a in alerts))
 
 
 def _clear_dedup_for_resolved(data: dict) -> None:
@@ -47,16 +62,54 @@ def _clear_dedup_for_resolved(data: dict) -> None:
         _alert_dedup_cache.pop(key, None)
 
 
-def _is_duplicate(key: str) -> bool:
+def _make_resolved_dedup_key(data: dict) -> str:
+    """用所有 resolved alert 的 fingerprint 生成 resolved 去重 key"""
+    pairs = sorted(
+        a.get('fingerprint', '')
+        for a in data.get('alerts', [])
+        if a.get('status') == 'resolved'
+    )
+    raw = json.dumps(pairs, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _clear_resolved_dedup_for_firing(data: dict) -> None:
+    """firing 批次到来时，清除对应 fingerprint 的 resolved 去重缓存
+    防止 resolved→firing→resolved 在 30 分钟内第二次 resolved 被拦截"""
+    pairs = sorted(
+        a.get('fingerprint', '')
+        for a in data.get('alerts', [])
+        if a.get('status') == 'firing'
+    )
+    raw = json.dumps(pairs, ensure_ascii=False, sort_keys=True)
+    key = hashlib.md5(raw.encode()).hexdigest()
+    with _resolved_dedup_lock:
+        _resolved_dedup_cache.pop(key, None)
+
+
+def _is_duplicate(key: str, cache: dict = None, lock: threading.Lock = None,
+                  ttl: int = _ALERT_DEDUP_TTL) -> bool:
+    """通用去重检查，支持自定义缓存、锁和 TTL
+
+    Args:
+        key: 去重 key
+        cache: 缓存字典，默认使用 _alert_dedup_cache
+        lock: 线程锁，默认使用 _alert_dedup_lock
+        ttl: 缓存 TTL（秒），默认 5 分钟
+    """
+    if cache is None:
+        cache = _alert_dedup_cache
+    if lock is None:
+        lock = _alert_dedup_lock
     now = time.time()
-    with _alert_dedup_lock:
+    with lock:
         # 清理过期记录
-        expired = [k for k, t in _alert_dedup_cache.items() if now - t > _ALERT_DEDUP_TTL]
+        expired = [k for k, t in cache.items() if now - t > ttl]
         for k in expired:
-            del _alert_dedup_cache[k]
-        if key in _alert_dedup_cache:
+            del cache[k]
+        if key in cache:
             return True
-        _alert_dedup_cache[key] = now
+        cache[key] = now
         return False
 from alerts_format.flashcat_utils import get_oncall_open_ids, send_phone_alert
 from alerts_format.alert_json_format import (
@@ -86,18 +139,78 @@ def _split_by_alert(data: dict) -> list:
     当 Grafana 将多个不同 tenant 的告警打包到同一批次时，commonLabels 中不含 tenant，
     导致 extract_all_labels 只能取第一条 alert 的 tenant 进行路由，造成路由错误。
     拆分后每条 alert 独立路由，避免被错误投递到其他群组。
+
+    关键：记录原始批次的顶层 status。Grafana 未开启恢复通知时，顶层 status='firing'，
+    批次中可能混有 resolved 实例。拆分后这些 resolved 子批次不应触发恢复通知。
     """
     alerts = data.get('alerts', [])
     if len(alerts) <= 1:
         return [data]
+    # 记录原始顶层状态（Grafana webhook 顶层 status：firing / resolved）
+    original_status = data.get('status', '')
     sub_payloads = []
     for alert in alerts:
         sub = dict(data)
         sub['alerts'] = [alert]
+        # 保留原始顶层状态，供 _is_all_resolved 判断使用
+        sub['_original_status'] = original_status
         # 用该 alert 自身的 labels 覆盖 commonLabels，保证路由时拿到正确的 tenant 等标签
         sub['commonLabels'] = {k: v for k, v in alert.get('labels', {}).items()}
         sub_payloads.append(sub)
     return sub_payloads
+
+
+def _group_and_aggregate_by_alertname(sub_payloads: list) -> list:
+    """将拆分后的子 payload 按 alertname 聚合，同 alertname 的 firing 子 payload 合并为一个批次。
+
+    解决问题：Grafana 将同一告警规则下多个 pod 的实例打包到同一批次，
+    拆分后每个 pod 独立路由导致发送多条卡片。聚合后同 alertname 的 firing
+    实例合并为一张卡片发送。
+
+    仅聚合 firing 子批次；resolved 子批次（原始顶层 status=resolved）保持独立。
+    """
+    firing_groups: dict[str, list] = {}   # alertname -> [sub_payload, ...]
+    resolved_payloads: list = []
+
+    for sub in sub_payloads:
+        original_status = sub.get('_original_status', '')
+        alert_status = sub.get('alerts', [{}])[0].get('status', '')
+
+        # 只有原始顶层 status=resolved 的 resolved 子批次才走恢复通知路径，保持独立
+        if original_status == 'resolved' and alert_status == 'resolved':
+            resolved_payloads.append(sub)
+            continue
+
+        # firing 子批次（含原始顶层 firing 中的 resolved 实例）按 alertname 聚合
+        alertname = sub.get('commonLabels', {}).get('alertname', '')
+        if not alertname:
+            # 无 alertname 无法聚合，保持独立
+            firing_groups.setdefault(f'__no_name_{id(sub)}', []).append(sub)
+        else:
+            firing_groups.setdefault(alertname, []).append(sub)
+
+    aggregated = []
+    for name, group in firing_groups.items():
+        if len(group) == 1:
+            aggregated.append(group[0])
+        else:
+            # 合并同 alertname 的子 payload
+            merged = dict(group[0])
+            merged['alerts'] = []
+            merged_common = {}
+            for sub in group:
+                merged['alerts'].extend(sub.get('alerts', []))
+                # 合并 commonLabels（后者不覆盖前者，保留首次出现的值）
+                for k, v in sub.get('commonLabels', {}).items():
+                    if k not in merged_common:
+                        merged_common[k] = v
+            merged['commonLabels'] = merged_common
+            # 标记为已聚合，防止递归调用 process_alert_request 时再次拆分
+            merged['_aggregated'] = True
+            logger.info("聚合同 alertname '%s' 的 %d 个子批次", name, len(group))
+            aggregated.append(merged)
+
+    return aggregated + resolved_payloads
 
 
 def process_alert_request(data, feishu_client):
@@ -117,10 +230,14 @@ def process_alert_request(data, feishu_client):
             logger.error("请求体不能为空")
             return {"code": 400, "msg": "请求体不能为空"}, 400
 
-        # 若批次中含多条来自不同 tenant 的 alert，拆分为单条子 payload 分别路由
-        sub_payloads = _split_by_alert(data)
+        # 若批次中含多条 alert，拆分为单条子 payload 分别路由，再按 alertname 聚合
+        # 已聚合的批次（_aggregated=True）跳过拆分，直接走单批次处理流程
+        sub_payloads = _split_by_alert(data) if not data.get('_aggregated') else [data]
         if len(sub_payloads) > 1:
-            logger.info("批次含 %d 条 alert，拆分后独立路由", len(sub_payloads))
+            # 按 alertname 聚合同名 firing 子批次，减少发送的卡片数量
+            sub_payloads = _group_and_aggregate_by_alertname(sub_payloads)
+            logger.info("批次含 %d 条 alert，拆分+聚合后 %d 个子批次独立路由",
+                        len(data.get('alerts', [])), len(sub_payloads))
             all_responses = []
             all_failed = 0
             all_total = 0
@@ -139,12 +256,21 @@ def process_alert_request(data, feishu_client):
                 "summary": {"total": all_total, "success": success_count, "failed": all_failed}
             }, 200
 
-        # 去重：resolved 告警永不去重（避免漏掉恢复通知）
-        # resolved 到来时清除对应 fingerprint 的 firing 缓存，防止 firing→resolved→firing 内 5 分钟漏第二次 firing
-        # firing 告警：5 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递）
+        # 去重逻辑：
+        # - firing 批次：5 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递）
+        # - resolved 批次：30 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递恢复通知）
+        # - 双向清除：resolved 到来时清 firing 缓存（防 firing→resolved→firing 漏发），
+        #   firing 到来时清 resolved 缓存（防 resolved→firing→resolved 漏发恢复通知）
         if _is_all_resolved(data):
             _clear_dedup_for_resolved(data)
+            resolved_key = _make_resolved_dedup_key(data)
+            if _is_duplicate(resolved_key, cache=_resolved_dedup_cache,
+                             lock=_resolved_dedup_lock, ttl=_RESOLVED_DEDUP_TTL):
+                logger.info("恢复告警重复，已跳过 (resolved_dedup_key=%s)", resolved_key)
+                return {"code": 0, "msg": "duplicate, skipped"}, 200
         else:
+            # firing 到来时清除对应 fingerprint 的 resolved 缓存
+            _clear_resolved_dedup_for_firing(data)
             dedup_key = _make_dedup_key(data)
             if _is_duplicate(dedup_key):
                 logger.info("告警重复，已跳过 (dedup_key=%s)", dedup_key)
@@ -308,15 +434,21 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         group_id=config_row.get('group_id'),
     )
 
-    # 判断是否符合 @ 条件
+    # 判断是否为 resolved 告警（原始顶层 status=resolved 且所有 alert 都是 resolved）
+    is_resolved = _is_all_resolved(data)
+
+    # 判断是否符合 @ 条件（恢复通知不艾特任何人，只在 firing 时艾特）
     rank = config_row.get('rank', '')
     is_phone_alert = any(s == 'phone' for s in severities)
     severity_matches = any(
         severity in [str(r) for r in rank.split(',')]
         for severity in severities
     )
-    if is_phone_alert:
-        # 电话告警：强制获取 oncall 值班人进行艾特（firing 和 resolved 都艾特，但只有 firing 才打电话）
+    if is_resolved:
+        # 恢复通知不艾特任何人
+        mentioned_user_list = []
+    elif is_phone_alert:
+        # 电话告警：强制获取 oncall 值班人进行艾特（仅 firing 艾特，resolved 不艾特）
         mentioned_user_list = _get_oncall_mentioned_users(config_row)
         logger.info("检测到 phone 级别告警，oncall 艾特用户数 %d", len(mentioned_user_list))
     elif severity_matches:
@@ -335,10 +467,6 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
     # 判断模板类型（默认 ops）
     template_type = config_row.get('template_type', 'ops')
     group_id = config_row['group_id']
-
-    # 判断是否为 resolved 告警（所有 alert 都是 resolved）
-    all_alerts = data.get('alerts', [])
-    is_resolved = all_alerts and all(a.get('status') == 'resolved' for a in all_alerts)
 
     # phone 级别仅 firing 时触发电话，resolved 不打电话
     if is_phone_alert and not is_resolved:
