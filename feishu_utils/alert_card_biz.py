@@ -132,8 +132,10 @@ def build_biz_firing_card(
         })
         elements.append({"tag": "hr"})
 
-    # 公共标签（过滤 alertname / grafana_folder / severity / alertid）
-    _label_blacklist = {'alertname', 'grafana_folder', 'severity', 'alertid'}
+    # 公共标签（过滤 alertname / grafana_folder / severity / alertid / model_name）
+    # model_name 已通过 extract_alert_raw 保留到每个实例的特有标签中，
+    # 此处排除避免在公共区域重复显示
+    _label_blacklist = {'alertname', 'grafana_folder', 'severity', 'alertid', 'model_name'}
     common_display = {k: v for k, v in (common_labels or {}).items() if k not in _label_blacklist}
     if common_display:
         field_items = [{"is_short": True, "text": {"tag": "lark_md", "content": f"**{k}**\n{v}"}}

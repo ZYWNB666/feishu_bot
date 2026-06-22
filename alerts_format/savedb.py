@@ -185,3 +185,53 @@ def get_message_id_by_fingerprint(fingerprint: str, group_id: str = None) -> str
         if connection and connection.is_connected():
             cursor.close()
             connection.close()
+
+
+def get_all_fingerprints_by_fingerprint(fingerprint: str, group_id: str = None) -> list:
+    """通过任一 fingerprint 反查其所属原始 firing 记录中的所有 fingerprint 列表。
+
+    用于 resolved 时的部分恢复检测：Grafana 按实例维度发送 resolved 通知，
+    每批只含部分实例。通过本函数取出原始 firing 记录中保存的全部 fingerprint，
+    与当前 resolved 批次的 fingerprint 比较，判断是否还有实例未恢复。
+
+    Args:
+        fingerprint: 当前 resolved 批次中任一实例的 fingerprint
+        group_id: 可选，限定群组范围，避免跨群组误匹配
+    Returns:
+        list: 原始记录中的所有 fingerprint 列表；查不到时返回空列表
+    """
+    if not fingerprint:
+        return []
+    connection = None
+    try:
+        db_config = config.get_alert_db_config()
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor()
+        if group_id:
+            cursor.execute(
+                "SELECT fingerprints FROM alert_data "
+                "WHERE JSON_CONTAINS(fingerprints, %s) AND group_id = %s "
+                "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
+                (json.dumps(fingerprint), group_id)
+            )
+        else:
+            cursor.execute(
+                "SELECT fingerprints FROM alert_data "
+                "WHERE JSON_CONTAINS(fingerprints, %s) "
+                "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
+                (json.dumps(fingerprint),)
+            )
+        row = cursor.fetchone()
+        if row and row[0]:
+            fps = row[0]
+            if isinstance(fps, str):
+                fps = json.loads(fps)
+            return list(fps) if fps else []
+        return []
+    except Error as e:
+        logger.error("查询全部 fingerprint 失败: %s", e)
+        return []
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()

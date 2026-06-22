@@ -111,6 +111,23 @@ def _is_duplicate(key: str, cache: dict = None, lock: threading.Lock = None,
             return True
         cache[key] = now
         return False
+
+
+def _evict_dedup(key: str, cache: dict = None, lock: threading.Lock = None) -> None:
+    """撤销去重缓存中的 key，用于处理失败后允许 Grafana 重试。
+
+    _is_duplicate() 在处理前就写入缓存，若处理失败（无匹配配置、发送异常等），
+    缓存残留会阻止 Grafana 的后续重试投递，导致恢复告警永久丢失。
+    本函数在各失败返回路径调用，撤销对应的缓存条目。
+    """
+    if cache is None:
+        cache = _alert_dedup_cache
+    if lock is None:
+        lock = _alert_dedup_lock
+    if not key:
+        return
+    with lock:
+        cache.pop(key, None)
 from alerts_format.flashcat_utils import get_oncall_open_ids, send_phone_alert
 from alerts_format.alert_json_format import (
     extract_all_labels,
@@ -125,7 +142,12 @@ from alerts_format.db_utils import (
     get_alert_config_by_labels,
     get_alert_config_by_alertid
 )
-from alerts_format.savedb import update_message_id, get_message_id_by_fingerprint, get_alerttime_by_fingerprint
+from alerts_format.savedb import (
+    update_message_id,
+    get_message_id_by_fingerprint,
+    get_alerttime_by_fingerprint,
+    get_all_fingerprints_by_fingerprint,
+)
 from feishu_utils.event_handler import alert_to_feishu
 from feishu_utils.alert_card_biz import build_biz_firing_card, build_biz_resolved_card
 
@@ -225,6 +247,10 @@ def process_alert_request(data, feishu_client):
         tuple: (response_dict, status_code)
     """
     try:
+        active_dedup_key = None
+        active_dedup_cache = None
+        active_dedup_lock = None
+
         # 参数验证
         if not data:
             logger.error("请求体不能为空")
@@ -268,6 +294,9 @@ def process_alert_request(data, feishu_client):
                              lock=_resolved_dedup_lock, ttl=_RESOLVED_DEDUP_TTL):
                 logger.info("恢复告警重复，已跳过 (resolved_dedup_key=%s)", resolved_key)
                 return {"code": 0, "msg": "duplicate, skipped"}, 200
+            active_dedup_key = resolved_key
+            active_dedup_cache = _resolved_dedup_cache
+            active_dedup_lock = _resolved_dedup_lock
         else:
             # firing 到来时清除对应 fingerprint 的 resolved 缓存
             _clear_resolved_dedup_for_firing(data)
@@ -275,6 +304,9 @@ def process_alert_request(data, feishu_client):
             if _is_duplicate(dedup_key):
                 logger.info("告警重复，已跳过 (dedup_key=%s)", dedup_key)
                 return {"code": 0, "msg": "duplicate, skipped"}, 200
+            active_dedup_key = dedup_key
+            active_dedup_cache = _alert_dedup_cache
+            active_dedup_lock = _alert_dedup_lock
 
         # 查找匹配的告警配置
         configs = _find_alert_configs(data)
@@ -282,6 +314,7 @@ def process_alert_request(data, feishu_client):
         # 未找到任何配置，返回404
         if not configs:
             logger.error("未找到任何匹配的告警配置")
+            _evict_dedup(active_dedup_key, cache=active_dedup_cache, lock=active_dedup_lock)
             return {
                 "error": "未找到匹配的告警配置",
                 "alertids": extract_alertids(data),
@@ -342,6 +375,8 @@ def process_alert_request(data, feishu_client):
         
         # 如果所有路由都失败，返回500
         if failed_count == len(configs):
+            logger.error("所有路由发送失败，撤销去重缓存以允许 Grafana 重试 (key=%s)", active_dedup_key)
+            _evict_dedup(active_dedup_key, cache=active_dedup_cache, lock=active_dedup_lock)
             return {
                 "code": 500, 
                 "msg": "所有路由发送失败", 
@@ -362,6 +397,7 @@ def process_alert_request(data, feishu_client):
         
     except Exception as e:
         logger.error("处理告警请求失败: %s", e, exc_info=True)
+        _evict_dedup(active_dedup_key, cache=active_dedup_cache, lock=active_dedup_lock)
         return {"code": 500, "msg": str(e)}, 500
 
 
@@ -482,6 +518,28 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             if mid:
                 thread_message_id = mid
                 break
+
+        # 部分恢复检测：Grafana 按实例维度发送 resolved 通知，每批只含部分实例。
+        # 通过任一 fingerprint 反查原始 firing 记录中保存的全部 fingerprint，
+        # 若当前 resolved 批次未覆盖全部实例，说明仍有实例在 firing，
+        # 此时应跳过恢复通知，避免在告警未完全恢复时发送误导性的"已恢复"卡片。
+        if fingerprints:
+            probe_fp = fingerprints[0]
+            all_original_fps = get_all_fingerprints_by_fingerprint(probe_fp, group_id=group_id)
+            if all_original_fps and len(all_original_fps) > len(fingerprints):
+                remaining = [fp for fp in all_original_fps if fp not in fingerprints]
+                logger.info(
+                    "⏸ 部分恢复检测：原始 %d 个实例，当前 resolved %d 个，"
+                    "仍有 %d 个实例未恢复，跳过恢复通知 group_id=%s",
+                    len(all_original_fps), len(fingerprints), len(remaining), group_id
+                )
+                return {
+                    'alert_id': config_row.get('alert_id'),
+                    'group_id': group_id,
+                    'success': True,
+                    'skipped': True,
+                    'reason': f'部分恢复，仍有 {len(remaining)} 个实例未恢复',
+                }
 
         if template_type == 'biz':
             raw_alerts = extract_alert_raw(data)

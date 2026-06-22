@@ -159,6 +159,11 @@ def extract_alert_raw(alert_info_data: dict) -> list:
             and (k not in original_common_labels or original_common_labels.get(k) != v)
         }
 
+        # model_name 对定位问题很关键，即使与公共标签相同也保留到每个实例，
+        # 避免 firing 卡片中多个实例只显示一次 model_name 的问题
+        if 'model_name' in labels and labels['model_name'] and 'model_name' not in specific:
+            specific['model_name'] = labels['model_name']
+
         annotations = alert.get('annotations', {})
         if isinstance(annotations, str):
             annotations = {}
