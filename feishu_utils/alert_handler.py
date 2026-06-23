@@ -219,12 +219,16 @@ def _group_and_aggregate_by_alertname(sub_payloads: list) -> list:
             # 合并同 alertname 的子 payload
             merged = dict(group[0])
             merged['alerts'] = []
-            merged_common = {}
             for sub in group:
                 merged['alerts'].extend(sub.get('alerts', []))
-                # 合并 commonLabels（后者不覆盖前者，保留首次出现的值）
-                for k, v in sub.get('commonLabels', {}).items():
-                    if k not in merged_common:
+            # 合并 commonLabels：取所有子批次的交集（相同 key 且相同 value 才保留），
+            # 避免首个子批次的特有标签（如不同 model）被误当作公共标签
+            sub_label_dicts = [sub.get('commonLabels', {}) for sub in group]
+            merged_common = {}
+            if sub_label_dicts:
+                first = sub_label_dicts[0]
+                for k, v in first.items():
+                    if all(d.get(k) == v for d in sub_label_dicts[1:]):
                         merged_common[k] = v
             merged['commonLabels'] = merged_common
             # 标记为已聚合，防止递归调用 process_alert_request 时再次拆分
