@@ -187,47 +187,54 @@ def get_message_id_by_fingerprint(fingerprint: str, group_id: str = None) -> str
             connection.close()
 
 
-def get_all_fingerprints_by_fingerprint(fingerprint: str, group_id: str = None) -> list:
-    """通过任一 fingerprint 反查其所属原始 firing 记录中的所有 fingerprint 列表。
+def get_all_fingerprints_by_fingerprint(fingerprints: list, group_id: str = None) -> list:
+    """通过当前 resolved 批次中的 fingerprint 集合，反查所有关联 firing 记录中的全部 fingerprint。
 
     用于 resolved 时的部分恢复检测：Grafana 按实例维度发送 resolved 通知，
-    每批只含部分实例。通过本函数取出原始 firing 记录中保存的全部 fingerprint，
-    与当前 resolved 批次的 fingerprint 比较，判断是否还有实例未恢复。
+    每批只含部分实例。由于 firing 时可能因拆分+聚合产生多条 DB 记录
+   （每条记录只含部分实例的 fingerprint），需要用当前批次所有 fingerprint
+    逐个反查，汇总所有命中记录中的全部 fingerprint，才能正确判断是否还有
+    实例未恢复。
 
     Args:
-        fingerprint: 当前 resolved 批次中任一实例的 fingerprint
+        fingerprints: 当前 resolved 批次中所有实例的 fingerprint 列表
         group_id: 可选，限定群组范围，避免跨群组误匹配
     Returns:
-        list: 原始记录中的所有 fingerprint 列表；查不到时返回空列表
+        list: 所有关联 firing 记录中的全部 fingerprint 列表（去重）；查不到时返回空列表
     """
-    if not fingerprint:
+    if not fingerprints:
         return []
     connection = None
     try:
         db_config = config.get_alert_db_config()
         connection = mysql.connector.connect(**db_config)
         cursor = connection.cursor()
-        if group_id:
-            cursor.execute(
-                "SELECT fingerprints FROM alert_data "
-                "WHERE JSON_CONTAINS(fingerprints, %s) AND group_id = %s "
-                "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
-                (json.dumps(fingerprint), group_id)
-            )
-        else:
-            cursor.execute(
-                "SELECT fingerprints FROM alert_data "
-                "WHERE JSON_CONTAINS(fingerprints, %s) "
-                "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
-                (json.dumps(fingerprint),)
-            )
-        row = cursor.fetchone()
-        if row and row[0]:
-            fps = row[0]
-            if isinstance(fps, str):
-                fps = json.loads(fps)
-            return list(fps) if fps else []
-        return []
+        all_fps = set()
+        for fp in fingerprints:
+            if not fp:
+                continue
+            if group_id:
+                cursor.execute(
+                    "SELECT fingerprints FROM alert_data "
+                    "WHERE JSON_CONTAINS(fingerprints, %s) AND group_id = %s "
+                    "ORDER BY created_at DESC, alerttime DESC",
+                    (json.dumps(fp), group_id)
+                )
+            else:
+                cursor.execute(
+                    "SELECT fingerprints FROM alert_data "
+                    "WHERE JSON_CONTAINS(fingerprints, %s) "
+                    "ORDER BY created_at DESC, alerttime DESC",
+                    (json.dumps(fp),)
+                )
+            for row in cursor.fetchall():
+                if row and row[0]:
+                    fps = row[0]
+                    if isinstance(fps, str):
+                        fps = json.loads(fps)
+                    if fps:
+                        all_fps.update(fps)
+        return list(all_fps)
     except Error as e:
         logger.error("查询全部 fingerprint 失败: %s", e)
         return []

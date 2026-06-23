@@ -524,14 +524,14 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
                 break
 
         # 部分恢复检测：Grafana 按实例维度发送 resolved 通知，每批只含部分实例。
-        # 通过任一 fingerprint 反查原始 firing 记录中保存的全部 fingerprint，
-        # 若当前 resolved 批次未覆盖全部实例，说明仍有实例在 firing，
-        # 此时应跳过恢复通知，避免在告警未完全恢复时发送误导性的"已恢复"卡片。
+        # 通过当前批次所有 fingerprint 反查所有关联 firing 记录中的全部 fingerprint，
+        # 若汇总后的原始 fingerprint 集合未全部包含在当前 resolved 批次中，
+        # 说明仍有实例在 firing，应跳过恢复通知，避免在告警未完全恢复时发送误导性的"已恢复"卡片。
         if fingerprints:
-            probe_fp = fingerprints[0]
-            all_original_fps = get_all_fingerprints_by_fingerprint(probe_fp, group_id=group_id)
-            if all_original_fps and len(all_original_fps) > len(fingerprints):
-                remaining = [fp for fp in all_original_fps if fp not in fingerprints]
+            all_original_fps = get_all_fingerprints_by_fingerprint(fingerprints, group_id=group_id)
+            resolved_set = set(fingerprints)
+            if all_original_fps and not resolved_set.issuperset(all_original_fps):
+                remaining = [fp for fp in all_original_fps if fp not in resolved_set]
                 logger.info(
                     "⏸ 部分恢复检测：原始 %d 个实例，当前 resolved %d 个，"
                     "仍有 %d 个实例未恢复，跳过恢复通知 group_id=%s",
