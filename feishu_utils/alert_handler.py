@@ -22,6 +22,14 @@ _resolved_dedup_cache: dict[str, float] = {}
 _resolved_dedup_lock = threading.Lock()
 _RESOLVED_DEDUP_TTL = 1800  # 秒（30分钟）：防止 Grafana repeat_interval 重复投递同一 resolved 告警
 
+# ── alertname+labels 维度去重缓存 ──
+# Grafana 不同评估周期的 fingerprint 可能不同（value 变化导致），
+# 单靠 fingerprint 去重无法拦截"同一告警规则重复触发"的情况。
+# 额外维护一个基于 alertname + group_id 的去重维度，
+# TTL 与 _ALERT_DEDUP_TTL 一致，确保同一告警在冷却期内不重复发送。
+_alert_label_dedup_cache: dict[str, float] = {}
+_alert_label_dedup_lock = threading.Lock()
+
 
 def _make_dedup_key(data: dict) -> str:
     """用所有 firing alert 的 fingerprint 生成去重 key（仅用于 firing 批次）"""
@@ -31,6 +39,25 @@ def _make_dedup_key(data: dict) -> str:
         if a.get('status') == 'firing'
     )
     raw = json.dumps(pairs, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _make_label_dedup_key(data: dict, group_id: str) -> str:
+    """用 alertname + group_id 生成语义级去重 key（仅用于 firing 批次）。
+
+    fingerprint 去重只能拦截 Grafana repeat_interval 的完全相同重发，
+    但不同评估周期因 value 变化导致 fingerprint 不同时，同一告警仍会重复发送。
+    本 key 基于 alertname + group_id，确保同一告警规则在同一群组的冷却期内不重复。
+    """
+    alertname = ''
+    common_labels = data.get('commonLabels', {})
+    if isinstance(common_labels, dict):
+        alertname = common_labels.get('alertname', '')
+    if not alertname:
+        alerts = data.get('alerts', [])
+        if alerts:
+            alertname = alerts[0].get('labels', {}).get('alertname', '')
+    raw = json.dumps({'alertname': alertname, 'group_id': group_id}, ensure_ascii=False, sort_keys=True)
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -203,13 +230,17 @@ def _group_and_aggregate_by_alertname(sub_payloads: list) -> list:
             resolved_payloads.append(sub)
             continue
 
-        # firing 子批次（含原始顶层 firing 中的 resolved 实例）按 alertname 聚合
+        # firing 子批次（含原始顶层 firing 中的 resolved 实例）按 alertname + tenant 聚合
+        # 仅 alertname 相同但 tenant 不同时不能合并，否则路由匹配会只取第一条 alert
+        # 的 tenant，导致另一个 tenant 的告警被路由到错误的群组。
         alertname = sub.get('commonLabels', {}).get('alertname', '')
+        tenant = sub.get('commonLabels', {}).get('tenant', '')
         if not alertname:
             # 无 alertname 无法聚合，保持独立
             firing_groups.setdefault(f'__no_name_{id(sub)}', []).append(sub)
         else:
-            firing_groups.setdefault(alertname, []).append(sub)
+            group_key = f'{alertname}||{tenant}'
+            firing_groups.setdefault(group_key, []).append(sub)
 
     aggregated = []
     for name, group in firing_groups.items():
@@ -233,7 +264,12 @@ def _group_and_aggregate_by_alertname(sub_payloads: list) -> list:
             merged['commonLabels'] = merged_common
             # 标记为已聚合，防止递归调用 process_alert_request 时再次拆分
             merged['_aggregated'] = True
-            logger.info("聚合同 alertname '%s' 的 %d 个子批次", name, len(group))
+            # name 格式为 "alertname||tenant"，拆分后分别记录
+            parts = name.split('||', 1)
+            log_name = parts[0] if parts else name
+            log_tenant = parts[1] if len(parts) > 1 else ''
+            logger.info("聚合同 alertname '%s' tenant='%s' 的 %d 个子批次",
+                        log_name, log_tenant, len(group))
             aggregated.append(merged)
 
     return aggregated + resolved_payloads
@@ -286,7 +322,7 @@ def process_alert_request(data, feishu_client):
                 "summary": {"total": all_total, "success": success_count, "failed": all_failed}
             }, 200
 
-        # 去重逻辑：
+        # 去重逻辑（第一层：fingerprint 级别）：
         # - firing 批次：5 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递）
         # - resolved 批次：30 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递恢复通知）
         # - 双向清除：resolved 到来时清 firing 缓存（防 firing→resolved→firing 漏发），
@@ -327,17 +363,54 @@ def process_alert_request(data, feishu_client):
         
         # 提取 alertname 作为标题
         alertname = extract_alertname(data)
+
+        # resolved 批次到来时，清除对应的语义去重缓存
+        # 防止 firing→resolved→firing 中第二轮 firing 被语义去重拦截
+        if _is_all_resolved(data):
+            for config_row in configs:
+                gid = config_row.get('group_id', '')
+                label_key = _make_label_dedup_key(data, gid)
+                _evict_dedup(label_key, cache=_alert_label_dedup_cache,
+                             lock=_alert_label_dedup_lock)
+
+        # 去重逻辑（第二层：alertname+group_id 语义级别，仅 firing）
+        # fingerprint 去重只能拦截完全相同的重发，但 Grafana 不同评估周期
+        # 因 value 变化导致 fingerprint 不同时，同一告警仍会重复发送。
+        # 此处基于 alertname+group_id 做语义去重，确保同一告警规则在同一群组
+        # 的冷却期内不重复发送。
+        label_keys_to_evict = []
+        label_dedup_skipped = set()  # 被语义去重跳过的 config 索引集合
+        if not _is_all_resolved(data):
+            for idx, config_row in enumerate(configs):
+                gid = config_row.get('group_id', '')
+                label_key = _make_label_dedup_key(data, gid)
+                if _is_duplicate(label_key, cache=_alert_label_dedup_cache,
+                                 lock=_alert_label_dedup_lock, ttl=_ALERT_DEDUP_TTL):
+                    logger.info("告警语义重复 (alertname='%s', group_id='%s')，跳过该路由",
+                                alertname, gid)
+                    label_dedup_skipped.add(idx)
+                else:
+                    label_keys_to_evict.append(label_key)
+            if len(label_dedup_skipped) == len(configs):
+                # 所有路由都命中语义去重，跳过整个批次
+                _evict_dedup(active_dedup_key, cache=active_dedup_cache, lock=active_dedup_lock)
+                return {"code": 0, "msg": "duplicate (alertname), skipped"}, 200
         
         # 处理每个匹配的配置
         responses = []
         failed_count = 0
         
-        logger.info("开始处理告警，共匹配 %d 个路由", len(configs))
+        # 有效路由数 = 总路由数 - 被语义去重跳过的路由数
+        effective_total = len(configs) - len(label_dedup_skipped)
+        logger.info("开始处理告警，共匹配 %d 个路由（%d 个被语义去重跳过）",
+                    len(configs), len(label_dedup_skipped))
         
-        for idx, config_row in enumerate(configs, 1):
+        for idx, config_row in enumerate(configs):
+            if idx in label_dedup_skipped:
+                continue
             try:
                 logger.info("处理路由 [%d/%d]: group_id=%s", 
-                           idx, len(configs), config_row.get('group_id'))
+                           idx + 1, len(configs), config_row.get('group_id'))
                 
                 # 处理单个配置的告警
                 response = _process_single_alert_config(
@@ -353,7 +426,7 @@ def process_alert_request(data, feishu_client):
                     # 记录失败但继续处理其他路由
                     failed_count += 1
                     logger.error("路由 [%d/%d] 发送失败: group_id=%s", 
-                               idx, len(configs), config_row.get('group_id'))
+                               idx + 1, len(configs), config_row.get('group_id'))
                     responses.append({
                         'alert_id': config_row.get('alert_id'),
                         'group_id': config_row.get('group_id'),
@@ -364,7 +437,7 @@ def process_alert_request(data, feishu_client):
             except Exception as e:
                 # 记录异常但继续处理其他路由
                 failed_count += 1
-                logger.error("路由 [%d/%d] 处理异常: %s", idx, len(configs), str(e), exc_info=True)
+                logger.error("路由 [%d/%d] 处理异常: %s", idx + 1, len(configs), str(e), exc_info=True)
                 responses.append({
                     'alert_id': config_row.get('alert_id'),
                     'group_id': config_row.get('group_id'),
@@ -373,14 +446,16 @@ def process_alert_request(data, feishu_client):
                 })
         
         # 统计结果
-        success_count = len(configs) - failed_count
+        success_count = effective_total - failed_count
         logger.info("告警处理完成: 成功 %d/%d, 失败 %d/%d", 
-                   success_count, len(configs), failed_count, len(configs))
+                   success_count, effective_total, failed_count, effective_total)
         
-        # 如果所有路由都失败，返回500
-        if failed_count == len(configs):
+        # 如果所有路由都失败，撤销所有去重缓存以允许 Grafana 重试
+        if effective_total > 0 and failed_count == effective_total:
             logger.error("所有路由发送失败，撤销去重缓存以允许 Grafana 重试 (key=%s)", active_dedup_key)
             _evict_dedup(active_dedup_key, cache=active_dedup_cache, lock=active_dedup_lock)
+            for lk in label_keys_to_evict:
+                _evict_dedup(lk, cache=_alert_label_dedup_cache, lock=_alert_label_dedup_lock)
             return {
                 "code": 500, 
                 "msg": "所有路由发送失败", 
@@ -390,10 +465,10 @@ def process_alert_request(data, feishu_client):
         # 如果部分成功，返回200但包含失败信息
         return {
             "code": 0, 
-            "msg": "success" if failed_count == 0 else f"部分成功 ({success_count}/{len(configs)})",
+            "msg": "success" if failed_count == 0 else f"部分成功 ({success_count}/{effective_total})",
             "data": responses,
             "summary": {
-                "total": len(configs),
+                "total": effective_total,
                 "success": success_count,
                 "failed": failed_count
             }
