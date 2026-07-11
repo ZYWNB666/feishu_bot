@@ -467,6 +467,7 @@
         <div class="tabs">
             <button class="tab-btn active" id="tab-btn-rules" onclick="switchTab('rules')">📋 告警规则</button>
             <button class="tab-btn" id="tab-btn-users" onclick="switchTab('users')">👥 飞书用户</button>
+            <button class="tab-btn" id="tab-btn-stats" onclick="switchTab('stats')">📊 告警统计</button>
         </div>
 
         <!-- 告警规则 Tab -->
@@ -545,6 +546,54 @@
                 </table>
             </div>
         </div><!-- /tab-users -->
+
+        <!-- 告警统计 Tab -->
+        <div id="tab-stats" class="tab-panel">
+            <div class="toolbar">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <label style="font-size:14px;color:#4a5568;">起始日期: <input type="date" id="statsStartDate" style="padding:6px 10px;border:1px solid #e2e8f0;border-radius:5px;font-size:14px;"></label>
+                    <label style="font-size:14px;color:#4a5568;">结束日期: <input type="date" id="statsEndDate" style="padding:6px 10px;border:1px solid #e2e8f0;border-radius:5px;font-size:14px;"></label>
+                    <button class="btn btn-primary" onclick="loadStatsTop()">🔍 查询</button>
+                </div>
+                <div>
+                    <span style="color:#718096;font-size:14px;">共 <strong id="statsAlertCount">0</strong> 条告警记录</span>
+                </div>
+            </div>
+            <div class="table-container">
+                <div id="statsLoading" class="loading"><p>加载中...</p></div>
+                <div id="statsEmpty" class="empty-state" style="display:none;">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                    </svg>
+                    <h3>暂无数据</h3>
+                    <p>请选择时间范围后点击查询</p>
+                </div>
+                <table id="statsTable" style="display:none;">
+                    <thead>
+                        <tr>
+                            <th>排名</th>
+                            <th>告警名称 (alertname)</th>
+                            <th>触发次数</th>
+                            <th>占比</th>
+                            <th style="width:300px;">趋势</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="statsTableBody"></tbody>
+                </table>
+            </div>
+        </div><!-- /tab-stats -->
+
+        <!-- 告警详情弹窗 -->
+        <div id="alertDetailModal" class="modal">
+            <div class="modal-content" style="max-width:1000px;">
+                <div class="modal-header">
+                    <h2 id="alertDetailTitle">告警详情</h2>
+                    <button class="close-btn" onclick="closeAlertDetailModal()">&times;</button>
+                </div>
+                <div id="alertDetailBody" style="max-height:70vh;overflow-y:auto;"></div>
+            </div>
+        </div>
 
     </div><!-- /container -->
 
@@ -1181,11 +1230,12 @@
         // Tab 切换
         // ─────────────────────────────────────────
         function switchTab(name) {
-            ['rules', 'users'].forEach(t => {
+            ['rules', 'users', 'stats'].forEach(t => {
                 document.getElementById('tab-' + t).classList.toggle('active', t === name);
                 document.getElementById('tab-btn-' + t).classList.toggle('active', t === name);
             });
             if (name === 'users') loadUsers();
+            if (name === 'stats') initStats();
         }
 
         // ─────────────────────────────────────────
@@ -1235,7 +1285,7 @@
             document.getElementById('u_open_id').value = '';
             document.getElementById('u_remark').value = '';
             document.getElementById('u_name').readOnly = false;
-            document.getElementById('userModal').style.display = 'flex';
+            document.getElementById('userModal').classList.add('active');
         }
 
         function editUser(id, name, open_id, remark) {
@@ -1244,11 +1294,11 @@
             document.getElementById('u_name').value = name;
             document.getElementById('u_open_id').value = open_id;
             document.getElementById('u_remark').value = remark;
-            document.getElementById('userModal').style.display = 'flex';
+            document.getElementById('userModal').classList.add('active');
         }
 
         function closeUserModal() {
-            document.getElementById('userModal').style.display = 'none';
+            document.getElementById('userModal').classList.remove('active');
         }
 
         async function submitUser(e) {
@@ -1304,6 +1354,208 @@
             } catch(e) {
                 showToast('删除失败，请重试', 'error');
             }
+        }
+        // ─────────────────────────────────────────
+        // 告警统计
+        // ─────────────────────────────────────────
+        let statsInitialized = false;
+
+        function initStats() {
+            if (!statsInitialized) {
+                // 默认设置结束日期为今天，开始日期为 7 天前
+                const today = new Date();
+                const weekAgo = new Date(today);
+                weekAgo.setDate(weekAgo.getDate() - 7);
+                document.getElementById('statsEndDate').value = today.toISOString().slice(0, 10);
+                document.getElementById('statsStartDate').value = weekAgo.toISOString().slice(0, 10);
+                statsInitialized = true;
+                loadStatsTop();
+            }
+        }
+
+        async function loadStatsTop() {
+            const start = document.getElementById('statsStartDate').value;
+            const end = document.getElementById('statsEndDate').value;
+            if (!start || !end) {
+                showToast('请选择起止日期', 'error');
+                return;
+            }
+            if (start > end) {
+                showToast('起始日期不能晚于结束日期', 'error');
+                return;
+            }
+
+            document.getElementById('statsLoading').style.display = 'block';
+            document.getElementById('statsEmpty').style.display = 'none';
+            document.getElementById('statsTable').style.display = 'none';
+
+            try {
+                const res = await fetch(`/api/alert_stats/top?start=${start}&end=${end}&limit=50`);
+                const result = await res.json();
+
+                document.getElementById('statsLoading').style.display = 'none';
+                if (result.code === 0) {
+                    document.getElementById('statsAlertCount').textContent = result.total_records || 0;
+                    if (result.data && result.data.length > 0) {
+                        displayStatsTop(result.data, result.total_records || 0);
+                    } else {
+                        document.getElementById('statsEmpty').style.display = 'flex';
+                    }
+                } else {
+                    showToast('查询失败: ' + result.msg, 'error');
+                    document.getElementById('statsEmpty').style.display = 'flex';
+                }
+            } catch (err) {
+                console.error('查询告警统计失败:', err);
+                document.getElementById('statsLoading').style.display = 'none';
+                document.getElementById('statsEmpty').style.display = 'flex';
+                showToast('查询失败，请重试', 'error');
+            }
+        }
+
+        function displayStatsTop(data, totalRecords) {
+            const tbody = document.getElementById('statsTableBody');
+            tbody.innerHTML = '';
+
+            // 计算最大值用于趋势条
+            const maxCount = Math.max(...data.map(d => d.count), 1);
+            // 总告警次数（所有 alertname 出现的总和）
+            const totalAlerts = data.reduce((sum, d) => sum + d.count, 0);
+
+            data.forEach((item, index) => {
+                const pct = totalAlerts > 0 ? (item.count / totalAlerts * 100).toFixed(1) : '0.0';
+                const barWidth = (item.count / maxCount * 100).toFixed(1);
+                const rankColor = index < 3
+                    ? ['#e53e3e', '#dd6b20', '#d69e2e'][index]
+                    : '#a0aec0';
+
+                const tr = document.createElement('tr');
+                tr.style.cursor = 'pointer';
+                tr.innerHTML = `
+                    <td>
+                        <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:${rankColor};color:white;font-weight:bold;font-size:13px;">${index + 1}</span>
+                    </td>
+                    <td><strong style="color:#2d3748;">${escapeHtml(item.alertname)}</strong></td>
+                    <td><span class="badge badge-critical" style="font-size:14px;">${item.count}</span></td>
+                    <td>${pct}%</td>
+                    <td>
+                        <div style="background:#e2e8f0;border-radius:4px;height:20px;overflow:hidden;">
+                            <div style="background:linear-gradient(90deg,#667eea,#764ba2);height:100%;width:${barWidth}%;border-radius:4px;transition:width 0.5s;"></div>
+                        </div>
+                    </td>
+                    <td>
+                        <button class="btn btn-primary" style="padding:5px 14px;font-size:12px;" onclick="showAlertDetails('${escapeAttr(item.alertname)}')">📋 查看详情</button>
+                    </td>
+                `;
+                tr.onclick = (e) => {
+                    // 避免按钮点击重复触发
+                    if (e.target.tagName !== 'BUTTON') {
+                        showAlertDetails(item.alertname);
+                    }
+                };
+                tbody.appendChild(tr);
+            });
+            document.getElementById('statsTable').style.display = 'table';
+        }
+
+        async function showAlertDetails(alertname) {
+            const start = document.getElementById('statsStartDate').value;
+            const end = document.getElementById('statsEndDate').value;
+
+            document.getElementById('alertDetailTitle').textContent = `📋 ${alertname} - 告警详情`;
+            document.getElementById('alertDetailBody').innerHTML = '<div class="loading"><p>加载中...</p></div>';
+            document.getElementById('alertDetailModal').classList.add('active');
+
+            try {
+                const res = await fetch(`/api/alert_stats/details?alertname=${encodeURIComponent(alertname)}&start=${start}&end=${end}&limit=200`);
+                const result = await res.json();
+
+                if (result.code === 0 && result.data) {
+                    displayAlertDetails(alertname, result.data, result.start, result.end);
+                } else {
+                    document.getElementById('alertDetailBody').innerHTML = `<p style="color:#f56565;text-align:center;padding:20px;">加载失败: ${escapeHtml(result.msg || '未知错误')}</p>`;
+                }
+            } catch (err) {
+                console.error('加载告警详情失败:', err);
+                document.getElementById('alertDetailBody').innerHTML = '<p style="color:#f56565;text-align:center;padding:20px;">加载失败，请重试</p>';
+            }
+        }
+
+        function displayAlertDetails(alertname, details, start, end) {
+            const body = document.getElementById('alertDetailBody');
+
+            if (details.length === 0) {
+                body.innerHTML = '<div class="empty-state"><h3>暂无详情数据</h3><p>该告警在选定时间范围内没有记录</p></div>';
+                return;
+            }
+
+            let html = `
+                <div class="info-box" style="margin-bottom:16px;">
+                    <p><strong>告警名称:</strong> ${escapeHtml(alertname)}</p>
+                    <p><strong>时间范围:</strong> ${start} ~ ${end}</p>
+                    <p><strong>命中记录:</strong> ${details.length} 条</p>
+                </div>
+                <table style="width:100%;border-collapse:collapse;">
+                    <thead>
+                        <tr style="background:#f7fafc;">
+                            <th style="padding:10px;text-align:left;border-bottom:2px solid #e2e8f0;">MAID</th>
+                            <th style="padding:10px;text-align:left;border-bottom:2px solid #e2e8f0;">项目</th>
+                            <th style="padding:10px;text-align:left;border-bottom:2px solid #e2e8f0;">告警时间</th>
+                            <th style="padding:10px;text-align:left;border-bottom:2px solid #e2e8f0;">状态</th>
+                            <th style="padding:10px;text-align:left;border-bottom:2px solid #e2e8f0;">标签详情</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            details.forEach(d => {
+                const statusBadge = d.silenced
+                    ? '<span class="badge badge-warning">🔕 已静默</span>'
+                    : '<span class="badge badge-critical">🔥 活跃</span>';
+
+                // 标签以键值对形式展示
+                let labelsHtml = '';
+                if (d.labels) {
+                    labelsHtml = Object.entries(d.labels).map(([k, v]) => {
+                        const isAlertname = k === 'alertname';
+                        const style = isAlertname
+                            ? 'background:#fed7d7;color:#c53030;font-weight:bold;'
+                            : 'background:#edf2f7;color:#4a5568;';
+                        return `<span style="display:inline-block;padding:3px 8px;border-radius:4px;font-size:12px;margin:2px;${style}">${escapeHtml(k)}: ${escapeHtml(v)}</span>`;
+                    }).join('');
+                }
+
+                html += `
+                    <tr style="border-bottom:1px solid #e2e8f0;">
+                        <td style="padding:10px;"><code style="font-size:12px;background:#f7fafc;padding:2px 6px;border-radius:4px;">${escapeHtml(d.id)}</code></td>
+                        <td style="padding:10px;">${escapeHtml(d.project || '-')}</td>
+                        <td style="padding:10px;font-size:13px;color:#718096;">${escapeHtml(d.alerttime || '-')}</td>
+                        <td style="padding:10px;">${statusBadge}</td>
+                        <td style="padding:10px;">${labelsHtml || '-'}</td>
+                    </tr>
+                `;
+            });
+
+            html += '</tbody></table>';
+            body.innerHTML = html;
+        }
+
+        function closeAlertDetailModal() {
+            document.getElementById('alertDetailModal').classList.remove('active');
+        }
+
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function escapeAttr(str) {
+            return String(str || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
         }
     </script>
 </body>

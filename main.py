@@ -565,6 +565,239 @@ def delete_feishu_user(user_id):
         return jsonify({"code": 500, "msg": str(e)}), 500
 
 
+# ──────────────────────────────────────────────
+# 告警统计 /api/alert_stats
+# ──────────────────────────────────────────────
+
+def _extract_alertnames_from_labels(alertlabels_json):
+    """从 alert_data.alertlabels JSON 中提取所有 alertname 标签值。
+
+    alertlabels 结构: {"matchers": [{"matchers": [{"name":"alertname","value":"Xx"}, ...]}, ...]}
+    每条记录可能包含多个告警实例，返回去重后的 alertname 列表。
+    """
+    names = set()
+    if not alertlabels_json:
+        return names
+    try:
+        data = json.loads(alertlabels_json) if isinstance(alertlabels_json, str) else alertlabels_json
+    except (json.JSONDecodeError, TypeError):
+        return names
+    for group in data.get('matchers', []):
+        for m in group.get('matchers', []):
+            if m.get('name') == 'alertname' and m.get('value'):
+                names.add(m['value'])
+    return names
+
+
+@app.route("/api/alert_stats/top", methods=["GET"])
+def alert_stats_top():
+    """Top 告警统计
+
+    GET /api/alert_stats/top?start=2026-01-01&end=2026-07-07&limit=20
+    返回指定时间范围内出现次数最多的 alertname 列表。
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        # 默认查询最近 7 天
+        end_str = flask_request.args.get('end')
+        start_str = flask_request.args.get('start')
+        limit = flask_request.args.get('limit', 20, type=int)
+
+        if end_str:
+            try:
+                end_dt = datetime.strptime(end_str, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"code": 400, "msg": "end 参数格式应为 YYYY-MM-DD"}), 400
+        else:
+            end_dt = datetime.now()
+
+        if start_str:
+            try:
+                start_dt = datetime.strptime(start_str, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"code": 400, "msg": "start 参数格式应为 YYYY-MM-DD"}), 400
+        else:
+            start_dt = end_dt - timedelta(days=7)
+
+        # alerttime 是 VARCHAR 存储的 ISO 格式字符串，可以直接做字符串比较
+        start_iso = start_dt.strftime('%Y-%m-%d')
+        end_iso = (end_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        db_config = config.get_config_db_config()
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute(
+            "SELECT id, alertlabels, project, alerttime "
+            "FROM alert_data "
+            "WHERE alerttime >= %s AND alerttime < %s "
+            "ORDER BY alerttime DESC",
+            (start_iso, end_iso)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        # 在 Python 层聚合 alertname 计数
+        stats = {}  # alertname -> count
+        for row in rows:
+            names = _extract_alertnames_from_labels(row.get('alertlabels'))
+            for name in names:
+                stats[name] = stats.get(name, 0) + 1
+
+        # 排序取 top N
+        result = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:limit]
+        data = [{"alertname": name, "count": cnt} for name, cnt in result]
+
+        return jsonify({
+            "code": 0,
+            "msg": "success",
+            "data": data,
+            "total_records": len(rows),
+            "start": start_dt.strftime('%Y-%m-%d'),
+            "end": end_dt.strftime('%Y-%m-%d')
+        })
+    except Exception as e:
+        logger.error("获取Top告警统计失败: %s", e, exc_info=True)
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@app.route("/api/alert_stats/details", methods=["GET"])
+def alert_stats_details():
+    """告警详情列表
+
+    GET /api/alert_stats/details?alertname=XXX&start=2026-01-01&end=2026-07-07&limit=100
+    返回指定 alertname 在时间范围内的每条告警详情。
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        alertname = flask_request.args.get('alertname')
+        if not alertname:
+            return jsonify({"code": 400, "msg": "alertname 参数不能为空"}), 400
+
+        end_str = flask_request.args.get('end')
+        start_str = flask_request.args.get('start')
+        limit = flask_request.args.get('limit', 200, type=int)
+
+        if end_str:
+            try:
+                end_dt = datetime.strptime(end_str, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"code": 400, "msg": "end 参数格式应为 YYYY-MM-DD"}), 400
+        else:
+            end_dt = datetime.now()
+
+        if start_str:
+            try:
+                start_dt = datetime.strptime(start_str, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"code": 400, "msg": "start 参数格式应为 YYYY-MM-DD"}), 400
+        else:
+            start_dt = end_dt - timedelta(days=7)
+
+        start_iso = start_dt.strftime('%Y-%m-%d')
+        end_iso = (end_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        db_config = config.get_config_db_config()
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor(dictionary=True)
+
+        # 先用 MySQL JSON_SEARCH 做粗筛：alertlabels 中包含 alertname 标签值匹配的记录
+        # 再在 Python 层精确过滤
+        cursor.execute(
+            "SELECT id, alertlabels, project, alerttime, silenceid, group_id "
+            "FROM alert_data "
+            "WHERE alerttime >= %s AND alerttime < %s "
+            "AND JSON_SEARCH(alertlabels, 'one', %s, NULL, '$**.value') IS NOT NULL "
+            "ORDER BY alerttime DESC",
+            (start_iso, end_iso, alertname)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        # 过滤出包含该 alertname 的记录，并提取完整标签
+        details = []
+        for row in rows:
+            labels_map = _extract_all_labels(row.get('alertlabels'), alertname)
+            if labels_map is None:
+                continue
+
+            # 解析 silenceid
+            silence_ids = []
+            if row.get('silenceid'):
+                try:
+                    silence_ids = json.loads(row['silenceid']) if isinstance(row['silenceid'], str) else row['silenceid']
+                except (json.JSONDecodeError, TypeError):
+                    silence_ids = []
+
+            details.append({
+                "id": row['id'],
+                "project": row.get('project', ''),
+                "alerttime": row.get('alerttime', ''),
+                "labels": labels_map,
+                "silenced": len(silence_ids) > 0,
+                "silence_ids": silence_ids,
+                "group_id": row.get('group_id', ''),
+            })
+            if len(details) >= limit:
+                break
+
+        return jsonify({
+            "code": 0,
+            "msg": "success",
+            "data": details,
+            "alertname": alertname,
+            "count": len(details),
+            "start": start_dt.strftime('%Y-%m-%d'),
+            "end": end_dt.strftime('%Y-%m-%d')
+        })
+    except Exception as e:
+        logger.error("获取告警详情失败: %s", e, exc_info=True)
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+def _extract_all_labels(alertlabels_json, target_alertname=None):
+    """从 alertlabels JSON 中提取标签字典。
+
+    如果 target_alertname 不为 None，则只在该条记录的任一告警实例中
+    包含匹配 alertname 时返回合并后的标签，否则返回 None。
+
+    返回: {label_name: label_value} 或 None
+    """
+    if not alertlabels_json:
+        return None
+    try:
+        data = json.loads(alertlabels_json) if isinstance(alertlabels_json, str) else alertlabels_json
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    merged_labels = {}
+    found = False
+    for group in data.get('matchers', []):
+        instance_labels = {}
+        instance_has_target = False
+        for m in group.get('matchers', []):
+            name = m.get('name')
+            value = m.get('value')
+            if name and value is not None:
+                instance_labels[name] = value
+                if name == 'alertname' and value == target_alertname:
+                    instance_has_target = True
+        if instance_labels:
+            # 如果没有指定 target，或者该实例包含 target alertname，则合并标签
+            if target_alertname is None or instance_has_target:
+                merged_labels.update(instance_labels)
+                if instance_has_target:
+                    found = True
+
+    if target_alertname is not None and not found:
+        return None
+    return merged_labels if merged_labels else None
+
+
 @app.route("/api/card_callback", methods=["POST"])
 def card_callback():
     """
