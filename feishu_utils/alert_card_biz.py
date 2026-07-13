@@ -64,8 +64,8 @@ def _silence_buttons(maid: str) -> dict:
     }
 
 
-def _grafana_buttons(grafana_urls: dict, maid: str = None) -> dict | None:
-    """构建 Grafana 跳转按钮 + 静默按钮（同一行）"""
+def _grafana_buttons(grafana_urls: dict, maid: str = None, incident_id: str = None) -> dict | None:
+    """构建 Grafana 跳转按钮 + 认领按钮 + 静默按钮（同一行）"""
     actions = []
     if grafana_urls.get('panelURL'):
         actions.append({
@@ -80,6 +80,13 @@ def _grafana_buttons(grafana_urls: dict, maid: str = None) -> dict | None:
             "text": {"tag": "plain_text", "content": "🔗 告警源"},
             "type": "default",
             "url": grafana_urls['generatorURL'],
+        })
+    if incident_id and maid:
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "📞 认领告警"},
+            "type": "danger",
+            "value": {"action": "ack_incident", "maid": maid, "incident_id": incident_id},
         })
     if maid:
         actions.append({
@@ -99,6 +106,7 @@ def build_biz_firing_card(
     maid: str,
     common_labels: dict,
     mentioned_user_list: list,
+    incident_id: str = None,
 ) -> str:
     """
     构建业务告警（firing）飞书卡片 JSON 字符串
@@ -110,6 +118,7 @@ def build_biz_firing_card(
     :param maid: 告警记录 ID
     :param common_labels: 公共标签字典（alertname 除外）
     :param mentioned_user_list: 需要 @ 的 open_id 列表
+    :param incident_id: Flashcat incident ID（电话告警时传入，用于认领按钮）
     :return: str, 序列化好的卡片 JSON
     """
     color_map = {
@@ -180,8 +189,8 @@ def build_biz_firing_card(
             })
         elements.append({"tag": "hr"})
 
-    # Grafana URL 按钮 + 静默按钮（同一行）
-    grafana_btn = _grafana_buttons(grafana_urls, maid)
+    # Grafana URL 按钮 + 认领按钮 + 静默按钮（同一行）
+    grafana_btn = _grafana_buttons(grafana_urls, maid, incident_id)
     if grafana_btn:
         elements.append(grafana_btn)
     elif maid:
@@ -204,7 +213,7 @@ def build_biz_firing_card(
     severity_label = severity_label_map.get(severity.lower(), severity) if severity else ""
 
     card = {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "title": {"tag": "plain_text", "content": f"🔔 {alertname}" + (f"  [{severity_label}]" if severity_label else "")},
             "template": template_color,
@@ -283,7 +292,7 @@ def build_biz_resolved_card(
         elements.append(grafana_btn)
 
     card = {
-        "config": {"wide_screen_mode": True},
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "title": {"tag": "plain_text", "content": f"✅ {alertname} 已恢复"},
             "template": "green",

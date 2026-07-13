@@ -435,7 +435,7 @@ def handle_message_received(feishu_client, event_data):
         return False
 
 
-def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, alertname="告警通知", severity="warning", maid=None):
+def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, alertname="告警通知", severity="warning", maid=None, incident_id=None):
     """
     处理告警信息发送到飞书（卡片格式）
     
@@ -447,6 +447,7 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
         alertname: 告警名称，用作卡片标题
         severity: 告警级别 (critical/warning/info/success)，默认warning
         maid: 告警MAID，用于静默功能
+        incident_id: Flashcat incident ID，用于电话告警认领按钮
         
     Returns:
         int: HTTP状态码
@@ -524,68 +525,87 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
         
         # 如果有MAID，添加静默时间选择按钮
         if maid:
+            silence_actions = [
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "🔕 静默2小时"
+                    },
+                    "type": "primary",
+                    "value": json.dumps({
+                        "action": "silence",
+                        "maid": maid,
+                        "duration": 7200  # 2小时
+                    })
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "🔕 静默12小时"
+                    },
+                    "type": "primary",
+                    "value": json.dumps({
+                        "action": "silence",
+                        "maid": maid,
+                        "duration": 43200  # 12小时
+                    })
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "🔕 静默24小时"
+                    },
+                    "type": "primary",
+                    "value": json.dumps({
+                        "action": "silence",
+                        "maid": maid,
+                        "duration": 86400  # 24小时
+                    })
+                },
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "🔕 静默3天"
+                    },
+                    "type": "primary",
+                    "value": json.dumps({
+                        "action": "silence",
+                        "maid": maid,
+                        "duration": 259200  # 3天
+                    })
+                }
+            ]
+            
+            # 电话告警时添加认领按钮
+            if incident_id:
+                silence_actions.insert(0, {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "📞 认领告警"
+                    },
+                    "type": "danger",
+                    "value": json.dumps({
+                        "action": "ack_incident",
+                        "maid": maid,
+                        "incident_id": incident_id
+                    })
+                })
+            
             elements.append({
                 "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": "🔕 静默2小时"
-                        },
-                        "type": "primary",
-                        "value": json.dumps({
-                            "action": "silence",
-                            "maid": maid,
-                            "duration": 7200  # 2小时
-                        })
-                    },
-                    {
-                        "tag": "button",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": "🔕 静默12小时"
-                        },
-                        "type": "primary",
-                        "value": json.dumps({
-                            "action": "silence",
-                            "maid": maid,
-                            "duration": 43200  # 12小时
-                        })
-                    },
-                    {
-                        "tag": "button",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": "🔕 静默24小时"
-                        },
-                        "type": "primary",
-                        "value": json.dumps({
-                            "action": "silence",
-                            "maid": maid,
-                            "duration": 86400  # 24小时
-                        })
-                    },
-                    {
-                        "tag": "button",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": "🔕 静默3天"
-                        },
-                        "type": "primary",
-                        "value": json.dumps({
-                            "action": "silence",
-                            "maid": maid,
-                            "duration": 259200  # 3天
-                        })
-                    }
-                ]
+                "actions": silence_actions
             })
         
         # 构建飞书卡片消息
         card_data = {
             "config": {
-                "wide_screen_mode": True
+                "wide_screen_mode": True,
+                "update_multi": True
             },
             "header": {
                 "title": {

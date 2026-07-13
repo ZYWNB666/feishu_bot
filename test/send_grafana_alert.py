@@ -41,6 +41,7 @@ def _build_phone_alert_payload():
                 "status": "firing",
                 "labels": {
                     "alertname": "ProductionDatabaseDown",
+                    "alertid": "5UC26VTRZ",
                     "grafana_folder": "Alert rules",
                     "instance": "10.0.0.1:5432",
                     "namespace": "production",
@@ -107,6 +108,7 @@ def _build_phone_resolved_payload():
                 "status": "resolved",
                 "labels": {
                     "alertname": "ProductionDatabaseDown",
+                    "alertid": "5UC26VTRZ",
                     "grafana_folder": "Alert rules",
                     "instance": "10.0.0.1:5432",
                     "namespace": "production",

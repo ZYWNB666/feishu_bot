@@ -59,6 +59,8 @@ class Config:
     FEISHU_USER_ACCESS_TOKEN = os.getenv("FEISHU_USER_ACCESS_TOKEN", "")
     # 电话告警 integration_key（severity=phone 时触发，通过 Flashcat Grafana 兼容接口发送）
     FLASHCAT_PHONE_INTEGRATION_KEY = os.getenv("FLASHCAT_PHONE_INTEGRATION_KEY", "ea9548ec10fa549699a6c0544a21bf0a895")
+    # Flashcat incident channel_id（创建电话告警 incident 时使用）
+    FLASHCAT_CHANNEL_ID = os.getenv("FLASHCAT_CHANNEL_ID", "")
     
     @classmethod
     def get_config_db_config(cls):

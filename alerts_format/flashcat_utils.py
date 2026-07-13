@@ -152,3 +152,111 @@ def send_phone_alert(data: dict, integration_key: str) -> bool:
     except Exception as e:
         logger.error("电话告警发送失败: %s", e)
         return False
+
+
+def create_phone_incident(data: dict, app_key: str, channel_id: str) -> str:
+    """创建 Flashcat incident 以触发电话告警
+
+    通过 incident/create API 创建一个 Critical 级别的 incident，
+    Flashcat 会根据 channel 的通知策略触发电话通知。
+
+    Args:
+        data: 原始告警数据（Grafana/Alertmanager webhook 格式）
+        app_key: Flashcat API key
+        channel_id: Flashcat channel_id（字符串或整数）
+
+    Returns:
+        str: 创建成功返回 incident_id，失败返回空字符串
+    """
+    if not app_key:
+        logger.error("FLASHCAT_APP_KEY 未配置，无法创建 incident")
+        return ""
+    if not channel_id:
+        logger.error("FLASHCAT_CHANNEL_ID 未配置，无法创建 incident")
+        return ""
+
+    # 从告警数据中提取标题和描述
+    alertname = ""
+    common_labels = data.get("commonLabels", {})
+    if isinstance(common_labels, dict):
+        alertname = common_labels.get("alertname", "")
+    if not alertname:
+        alerts = data.get("alerts", [])
+        if alerts:
+            alertname = alerts[0].get("labels", {}).get("alertname", "告警")
+
+    # 提取描述（取第一条 alert 的 description 或 summary）
+    description = ""
+    for alert in data.get("alerts", []):
+        annotations = alert.get("annotations", {})
+        description = annotations.get("description") or annotations.get("summary", "")
+        if description:
+            break
+    if not description:
+        description = f"告警 {alertname} 已触发，请立即处理"
+
+    # 尝试将 channel_id 转为整数（Flashcat API 要求数字类型）
+    try:
+        channel_id_int = int(channel_id)
+    except (ValueError, TypeError):
+        logger.error("FLASHCAT_CHANNEL_ID '%s' 不是有效数字", channel_id)
+        return ""
+
+    payload = {
+        "incident_severity": "Critical",
+        "title": alertname,
+        "description": description,
+        "channel_id": channel_id_int,
+    }
+
+    url = f"{FLASHCAT_API_BASE}/incident/create?app_key={app_key}"
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        result = resp.json()
+        incident_id = result.get("data", {}).get("incident_id", "")
+        if incident_id:
+            logger.info("Flashcat incident 创建成功: incident_id=%s title=%s", incident_id, alertname)
+            return incident_id
+        else:
+            logger.error("Flashcat incident 创建失败: 响应中无 incident_id, body=%s", resp.text[:200])
+            return ""
+    except Exception as e:
+        logger.error("创建 Flashcat incident 失败: %s", e)
+        return ""
+
+
+def ack_incident(app_key: str, incident_id: str) -> bool:
+    """认领（ack）Flashcat incident
+
+    Args:
+        app_key: Flashcat API key
+        incident_id: Flashcat incident ID
+
+    Returns:
+        bool: 认领成功返回 True，否则返回 False
+    """
+    if not app_key:
+        logger.error("FLASHCAT_APP_KEY 未配置，无法认领 incident")
+        return False
+    if not incident_id:
+        logger.error("incident_id 为空，无法认领")
+        return False
+
+    url = f"{FLASHCAT_API_BASE}/incident/ack?app_key={app_key}"
+    payload = {"incident_ids": [incident_id]}
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+            logger.info("Flashcat incident 认领成功: incident_id=%s (attempt %d/%d)", incident_id, attempt, max_retries)
+            return True
+        except Exception as e:
+            if attempt < max_retries:
+                wait = attempt * 2
+                logger.warning("认领 Flashcat incident 失败 (attempt %d/%d): %s, %d秒后重试", attempt, max_retries, e, wait)
+                time.sleep(wait)
+            else:
+                logger.error("认领 Flashcat incident 失败 (已重试 %d 次): %s", max_retries, e)
+                return False

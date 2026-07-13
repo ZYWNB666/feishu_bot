@@ -155,7 +155,7 @@ def _evict_dedup(key: str, cache: dict = None, lock: threading.Lock = None) -> N
         return
     with lock:
         cache.pop(key, None)
-from alerts_format.flashcat_utils import get_oncall_open_ids, send_phone_alert
+from alerts_format.flashcat_utils import get_oncall_open_ids, send_phone_alert, create_phone_incident
 from alerts_format.alert_json_format import (
     extract_all_labels,
     extract_alertids,
@@ -171,6 +171,7 @@ from alerts_format.db_utils import (
 )
 from alerts_format.savedb import (
     update_message_id,
+    update_incident_id,
     get_message_id_by_fingerprint,
     get_alerttime_by_fingerprint,
     get_all_fingerprints_by_fingerprint,
@@ -584,9 +585,11 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
     group_id = config_row['group_id']
 
     # phone 级别仅 firing 时触发电话，resolved 不打电话
+    # 创建 Flashcat incident 以触发电话通知，返回 incident_id 用于卡片认领按钮
+    incident_id = None
     if is_phone_alert and not is_resolved:
-        logger.info("📞 触发电话告警（firing）")
-        _trigger_phone_alert_async(data)
+        logger.info("📞 触发电话告警（firing），创建 Flashcat incident")
+        incident_id = _create_phone_incident(data, maid)
 
     # ---------- resolved 告警：尝试在话题中回复 ----------
     if is_resolved:
@@ -669,7 +672,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         raw_alerts = extract_alert_raw(data)
         common_labels = data.get('commonLabels', {})
         content = build_biz_firing_card(
-            alertname, alert_severity, raw_alerts, grafana_urls, maid, common_labels, mentioned_user_list
+            alertname, alert_severity, raw_alerts, grafana_urls, maid, common_labels, mentioned_user_list, incident_id
         )
         if not content:
             logger.info("biz firing 卡片无 firing 实例，跳过发送 group_id=%s", group_id)
@@ -690,6 +693,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             alertname=alertname,
             severity=alert_severity,
             maid=maid,
+            incident_id=incident_id,
         )
 
     if message_id:
@@ -741,26 +745,50 @@ def _get_oncall_mentioned_users(config_row: dict) -> list:
     return get_oncall_open_ids(app_key, schedule_id)
 
 
-def _trigger_phone_alert_async(data: dict) -> None:
-    """在后台线程中发送电话告警，不阻塞主流程
+def _create_phone_incident(data: dict, maid: str) -> str:
+    """创建 Flashcat incident 以触发电话告警，并将 incident_id 入库
+
+    通过 incident/create API 创建 Critical 级别 incident，Flashcat 会根据
+    channel 通知策略触发电话通知。创建成功后将 incident_id 写入 alert_data 表。
 
     Args:
         data: 原始告警数据
+        maid: 告警记录 ID，用于将 incident_id 写入 DB
+
+    Returns:
+        str: 创建成功返回 incident_id，失败返回 None
     """
-    integration_key = Config.FLASHCAT_PHONE_INTEGRATION_KEY
-    if not integration_key:
-        logger.error("FLASHCAT_PHONE_INTEGRATION_KEY 未配置，无法触发电话告警")
-        return
+    app_key = Config.FLASHCAT_APP_KEY
+    channel_id = Config.FLASHCAT_CHANNEL_ID
 
-    def _do_send():
-        result = send_phone_alert(data, integration_key)
-        if result:
-            logger.info("📞 电话告警已成功触发")
-        else:
-            logger.error("📞 电话告警触发失败")
+    if not app_key:
+        logger.error("FLASHCAT_APP_KEY 未配置，无法创建电话告警 incident")
+        return None
+    if not channel_id:
+        logger.error("FLASHCAT_CHANNEL_ID 未配置，无法创建电话告警 incident")
+        return None
 
-    t = threading.Thread(target=_do_send, daemon=True)
-    t.start()
+    incident_id = create_phone_incident(data, app_key, channel_id)
+    if incident_id:
+        logger.info("📞 Flashcat incident 创建成功: incident_id=%s", incident_id)
+        # 将 incident_id 入库，供后续认领按钮使用
+        if maid:
+            update_incident_id(maid, incident_id)
+        return incident_id
+    else:
+        logger.error("📞 Flashcat incident 创建失败，回退到旧接口")
+        # 回退到旧接口
+        integration_key = Config.FLASHCAT_PHONE_INTEGRATION_KEY
+        if integration_key:
+            def _do_send_fallback():
+                result = send_phone_alert(data, integration_key)
+                if result:
+                    logger.info("📞 电话告警（回退旧接口）已成功触发")
+                else:
+                    logger.error("📞 电话告警（回退旧接口）触发失败")
+            t = threading.Thread(target=_do_send_fallback, daemon=True)
+            t.start()
+        return None
 
 
 def _build_ops_resolved_content(string_alert_info: str, alertname: str, mentioned_user_list: list = None) -> str:

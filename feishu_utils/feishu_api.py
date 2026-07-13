@@ -134,6 +134,60 @@ class FeishuApiClient:
         self._check_error_response(resp)
         logger.info("消息回复成功")
         return resp.json()
+
+    def get_message(self, message_id, card_msg_content_type="user_card_content"):
+        """获取单条消息内容
+
+        Args:
+            message_id: 消息ID
+            card_msg_content_type: 卡片消息返回格式
+                - "user_card_content": 返回发送时的原始卡片 JSON（默认）
+                - 不传: 返回飞书转换后的卡片结构（格式不同，不适用于 PATCH 更新）
+
+        Returns:
+            dict: 消息数据（items[0]），失败返回 None
+        """
+        self._authorize_tenant_access_token()
+        url = f"{self._lark_host}{self.MESSAGE_URI}/{message_id}"
+        if card_msg_content_type:
+            url += f"?card_msg_content_type={card_msg_content_type}"
+        headers = {
+            "Authorization": f"Bearer {self.tenant_access_token}",
+        }
+        try:
+            resp = requests.get(url=url, headers=headers, timeout=10)
+            self._check_error_response(resp)
+            data = resp.json()
+            items = (data.get('data') or {}).get('items') or []
+            return items[0] if items else None
+        except Exception as e:
+            logger.error("获取消息失败: message_id=%s, error=%s", message_id, e)
+            return None
+
+    def patch_message(self, message_id, content):
+        """更新（PATCH）一条消息内容
+
+        Args:
+            message_id: 消息ID
+            content: 新的消息内容（JSON字符串格式）
+
+        Returns:
+            dict: API 响应
+        """
+        self._authorize_tenant_access_token()
+        url = f"{self._lark_host}{self.MESSAGE_URI}/{message_id}"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.tenant_access_token}",
+        }
+        req_body = {
+            "content": content,
+        }
+        logger.info("更新消息: message_id=%s", message_id)
+        resp = requests.patch(url=url, headers=headers, json=req_body, timeout=10)
+        self._check_error_response(resp)
+        logger.info("消息更新成功: message_id=%s", message_id)
+        return resp.json()
     
     def _authorize_tenant_access_token(self):
         """

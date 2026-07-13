@@ -12,6 +12,7 @@ import mysql.connector
 
 from alerts_format.ma import macreate, madelete
 from alerts_format.grafana_silence import grafana_create_silence, grafana_delete_silence
+from alerts_format.flashcat_utils import ack_incident
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +365,242 @@ def handle_cancel_silence_action(maid, open_message_id, feishu_client, operator_
     thread.start()
 
 
+def create_ack_success_card(maid, incident_id, operator_id=None):
+    """
+    创建认领成功的卡片
+
+    Args:
+        maid: 告警ID
+        incident_id: Flashcat incident ID
+        operator_id: 操作人 open_id
+
+    Returns:
+        dict: 飞书卡片数据
+    """
+    card_data = {
+        "config": {
+            "wide_screen_mode": True
+        },
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": "✅ 告警已认领"
+            },
+            "template": "green"
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**告警 {maid} 已认领**\nFlashcat incident: `{incident_id}`\n电话通知将停止"
+                }
+            },
+            {
+                "tag": "hr"
+            },
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": f"⏰ 操作时间: {_get_current_time()}"
+                    },
+                    {
+                        "tag": "lark_md",
+                        "content": f"👤 操作人: <at id=\"{operator_id}\"></at>" if operator_id else ""
+                    }
+                ]
+            }
+        ]
+    }
+
+    return card_data
+
+
+def handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client, operator_id=None):
+    """
+    处理认领告警操作（异步执行）
+
+    1. 调用 Flashcat incident/ack API 认领 incident
+    2. 认领成功后，原地更新原告警卡片：标题改为"已认领"、移除认领按钮、追加认领人信息
+    3. 同时在话题中回复一条认领确认消息
+
+    Args:
+        maid: 告警ID
+        incident_id: Flashcat incident ID
+        open_message_id: 消息ID（触发回调的卡片消息ID，用于原地更新和话题回复）
+        feishu_client: 飞书客户端实例
+        operator_id: 操作人 open_id
+    """
+    def process_ack():
+        try:
+            from config.config import Config
+            app_key = Config.FLASHCAT_APP_KEY
+            if not app_key:
+                logger.error("FLASHCAT_APP_KEY 未配置，无法认领 incident")
+                failure_card = create_failure_card(maid, "认领", "FLASHCAT_APP_KEY 未配置")
+                feishu_client.reply_message(
+                    open_message_id,
+                    "interactive",
+                    json.dumps(failure_card),
+                    reply_in_thread=True,
+                )
+                return
+
+            success = ack_incident(app_key, incident_id)
+            if success:
+                # ── 原地更新原告警卡片（认领按钮改为禁用+已认领）──
+                _update_card_after_ack(feishu_client, open_message_id, operator_id)
+                logger.info("认领告警完成: maid=%s incident_id=%s", maid, incident_id)
+            else:
+                logger.error("认领告警失败: maid=%s incident_id=%s", maid, incident_id)
+        except Exception as e:
+            logger.error("处理认领告警时出错: %s", e)
+
+    thread = threading.Thread(target=process_ack)
+    thread.daemon = True
+    thread.start()
+
+
+def _update_card_after_ack(feishu_client, open_message_id, operator_id=None):
+    """原地更新告警卡片：认领按钮改为禁用+已认领文案、追加认领人信息
+
+    Args:
+        feishu_client: 飞书客户端实例
+        open_message_id: 原告警卡片的消息ID
+        operator_id: 认领人 open_id
+    """
+    # 获取原卡片内容
+    msg_data = feishu_client.get_message(open_message_id)
+    if not msg_data or not isinstance(msg_data, dict):
+        logger.warning("无法获取原卡片消息，跳过原地更新: message_id=%s", open_message_id)
+        return
+
+    # 从消息数据中提取卡片 JSON
+    # 飞书 API 返回的 body 可能是 dict 或其他类型，需要防御性处理
+    body = msg_data.get('body', {})
+    if not isinstance(body, dict):
+        logger.warning("原卡片消息 body 格式异常: %s, 跳过原地更新", type(body).__name__)
+        return
+    content_str = body.get('content', '')
+    logger.debug("原卡片消息 content 类型: %s, 前500字符: %s", type(content_str).__name__, str(content_str)[:500])
+
+    # content 可能是 JSON 字符串，也可能是已解析的 dict/list
+    if isinstance(content_str, (dict, list)):
+        card = content_str
+    elif isinstance(content_str, str) and content_str:
+        try:
+            card = json.loads(content_str)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("原卡片消息 content 解析失败，跳过原地更新")
+            return
+    else:
+        logger.warning("原卡片消息 content 为空，跳过原地更新")
+        return
+
+    # 某些情况下飞书 API 返回的 content 外层多包了一层
+    # 例如 {"type":"raw","content":"{...卡片JSON...}"}
+    if isinstance(card, dict) and 'content' in card and isinstance(card['content'], str):
+        try:
+            inner = json.loads(card['content'])
+            if isinstance(inner, dict) and 'elements' in inner:
+                card = inner
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if not isinstance(card, dict):
+        logger.warning("原卡片消息内容不是 dict，跳过原地更新: type=%s", type(card).__name__)
+        return
+
+    logger.debug("解析后的卡片 elements 数量: %d, elements 类型: %s",
+                 len(card.get('elements', [])), type(card.get('elements')).__name__)
+    for i, elem in enumerate(card.get('elements', [])):
+        logger.debug("  element[%d] type=%s tag=%s", i, type(elem).__name__,
+                     elem.get('tag') if isinstance(elem, dict) else 'N/A')
+
+    # ── 遍历 elements，将认领按钮改为禁用+已认领文案 ──
+    operator_line = f"👤 认领人: <at id=\"{operator_id}\"></at>" if operator_id else "👤 认领人: 未知"
+    elements = card.get('elements', [])
+    for elem in elements:
+        if not isinstance(elem, dict) or elem.get('tag') != 'action':
+            continue
+        actions = elem.get('actions', [])
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+
+            # 多种方式识别认领按钮：
+            # 1. value.action == 'ack_incident'（原始发送格式）
+            # 2. 按钮文案包含"认领"（飞书返回时 value 可能被剥离）
+            value = action.get('value', {})
+            is_ack_button = False
+            if isinstance(value, dict) and value.get('action') == 'ack_incident':
+                is_ack_button = True
+            elif isinstance(value, str):
+                try:
+                    parsed_val = json.loads(value)
+                    if parsed_val.get('action') == 'ack_incident':
+                        is_ack_button = True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # 文案兜底识别
+            if not is_ack_button:
+                btn_text = action.get('text', {})
+                if isinstance(btn_text, dict):
+                    btn_content = btn_text.get('content', '')
+                    if '认领' in btn_content:
+                        is_ack_button = True
+                elif isinstance(btn_text, str) and '认领' in btn_text:
+                    is_ack_button = True
+
+            if is_ack_button:
+                # 禁用按钮、清空 value 使其不可点击，文案保持"认领告警"不变
+                action['type'] = "default"
+                action['disabled'] = True
+                action['value'] = {}
+                # 同时移除可能存在的交互属性，确保按钮完全不可点击
+                action.pop('url', None)
+                action.pop('multi_url', None)
+                action.pop('behaviors', None)
+                logger.info("认领按钮已改为禁用状态: %s", json.dumps(action, ensure_ascii=False))
+
+    # ── 在卡片末尾追加认领人信息 ──
+    ack_note = {
+        "tag": "note",
+        "elements": [
+            {"tag": "plain_text", "content": f"✅ 已认领 | {_get_current_time()}"},
+            {"tag": "lark_md", "content": operator_line},
+        ],
+    }
+    elements.append({"tag": "hr"})
+    elements.append(ack_note)
+
+    # 确保 config 中有 update_multi: True（飞书 PATCH 要求）
+    config = card.get('config', {})
+    if not isinstance(config, dict):
+        config = {}
+    config['update_multi'] = True
+    card['config'] = config
+
+    # ── 调用 PATCH 接口原地更新（带 retry）──
+    card_json = json.dumps(card, ensure_ascii=False)
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            feishu_client.patch_message(open_message_id, card_json)
+            logger.info("原卡片已原地更新为已认领状态: message_id=%s (attempt %d/%d)", open_message_id, attempt, max_retries)
+            return
+        except Exception as e:
+            if attempt < max_retries:
+                wait = attempt * 2
+                logger.warning("原地更新卡片失败 (attempt %d/%d): %s, %d秒后重试", attempt, max_retries, e, wait)
+                time.sleep(wait)
+            else:
+                logger.error("原地更新卡片失败（已重试 %d 次）: %s（不影响认领流程）", max_retries, e)
+
+
 def parse_callback_data(data):
     """
     解析飞书卡片回调数据
@@ -494,8 +731,17 @@ def process_card_callback(data, feishu_client):
             handle_cancel_silence_action(maid, open_message_id, feishu_client, open_id)
             return {}
         
+        # 处理认领告警操作
+        elif action_type == "ack_incident":
+            maid = action_value.get("maid")
+            incident_id = action_value.get("incident_id")
+            
+            logger.info("执行认领告警操作: maid=%s incident_id=%s", maid, incident_id)
+            handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client, open_id)
+            return {}
+        
         # 未知操作
-        logger.warning("未知的操作类型")
+        logger.warning("未知的操作类型: %s", action_type)
         return {}
         
     except Exception as e:
