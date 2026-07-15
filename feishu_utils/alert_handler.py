@@ -172,6 +172,7 @@ from alerts_format.db_utils import (
 from alerts_format.savedb import (
     update_message_id,
     update_incident_id,
+    save_card_content,
     get_message_id_by_fingerprint,
     get_alerttime_by_fingerprint,
     get_all_fingerprints_by_fingerprint,
@@ -695,11 +696,16 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             maid=maid,
             incident_id=incident_id,
         )
+        # ops 模板卡片在 alert_to_feishu 内部构建，无 content 变量
+        content = None
 
     if message_id:
         # 保存 message_id 供后续 resolved/静默话题回复
         if maid:
             update_message_id(maid, message_id)
+            # 保存原始卡片 JSON，认领时原地更新卡片使用（仅 biz 模板）
+            if incident_id and content:
+                save_card_content(maid, content)
         logger.info("✅ 发送告警信息成功，群组: %s，级别: %s", group_id, alert_severity)
         return {
             'alert_id': config_row.get('alert_id'),

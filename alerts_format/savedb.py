@@ -159,6 +159,53 @@ def get_incident_id_by_maid(maid: str) -> str:
             connection.close()
 
 
+def save_card_content(maid: str, card_content: str) -> None:
+    """将原始卡片 JSON 存入 alert_data，认领时原地更新卡片使用"""
+    if not maid or not card_content:
+        return
+    connection = None
+    try:
+        db_config = config.get_alert_db_config()
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor()
+        cursor.execute(
+            "UPDATE alert_data SET card_content = %s WHERE id = %s",
+            (card_content, maid)
+        )
+        connection.commit()
+        logger.debug("已将 card_content 写入 maid=%s (len=%d)", maid, len(card_content))
+    except Error as e:
+        logger.error("保存 card_content 失败: %s", e)
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+
+def get_card_content(maid: str) -> str:
+    """从 alert_data 读取原始卡片 JSON"""
+    if not maid:
+        return ''
+    connection = None
+    try:
+        db_config = config.get_alert_db_config()
+        connection = mysql.connector.connect(**db_config)
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT card_content FROM alert_data WHERE id = %s",
+            (maid,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else ''
+    except Error as e:
+        logger.error("查询 card_content 失败: %s", e)
+        return ''
+    finally:
+        if connection and connection.is_connected():
+            cursor.close()
+            connection.close()
+
+
 def get_alerttime_by_fingerprint(fingerprint: str, group_id: str = None) -> str:
     """通过 fingerprint（+可选 group_id）查找对应告警的 alerttime（ISO 字符串，取最早一条触发时间用于计算时长）"""
     if not fingerprint:

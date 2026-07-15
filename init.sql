@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS alert_data (
     fingerprints JSON DEFAULT NULL COMMENT '告警指纹列表(JSON数组)，用于 resolved 反查',
     group_id VARCHAR(128) DEFAULT NULL COMMENT '发送目标群组ID',
     incident_id VARCHAR(64) DEFAULT NULL COMMENT 'Flashcat incident ID（电话告警认领用）',
+    card_content MEDIUMTEXT DEFAULT NULL COMMENT '原始卡片JSON（认领时原地更新用）',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间，用于按插入顺序排序'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='告警数据表';
 

@@ -451,7 +451,7 @@ def handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client
             success = ack_incident(app_key, incident_id)
             if success:
                 # ── 原地更新原告警卡片（认领按钮改为禁用+已认领）──
-                _update_card_after_ack(feishu_client, open_message_id, operator_id)
+                _update_card_after_ack(feishu_client, open_message_id, operator_id, maid)
                 logger.info("认领告警完成: maid=%s incident_id=%s", maid, incident_id)
             else:
                 logger.error("认领告警失败: maid=%s incident_id=%s", maid, incident_id)
@@ -463,63 +463,42 @@ def handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client
     thread.start()
 
 
-def _update_card_after_ack(feishu_client, open_message_id, operator_id=None):
-    """原地更新告警卡片：认领按钮改为禁用+已认领文案、追加认领人信息
+def _update_card_after_ack(feishu_client, open_message_id, operator_id=None, maid=None):
+    """原地更新告警卡片：认领按钮改为禁用、追加认领人信息
+
+    从数据库读取发送时保存的原始卡片 JSON，修改后 PATCH。
+    不使用飞书 GET API（会剥离按钮 value 导致静默按钮失效）。
 
     Args:
         feishu_client: 飞书客户端实例
         open_message_id: 原告警卡片的消息ID
         operator_id: 认领人 open_id
+        maid: 告警ID，用于从数据库读取原始卡片 JSON
     """
-    # 获取原卡片内容
-    msg_data = feishu_client.get_message(open_message_id)
-    if not msg_data or not isinstance(msg_data, dict):
-        logger.warning("无法获取原卡片消息，跳过原地更新: message_id=%s", open_message_id)
+    if not maid:
+        logger.warning("maid 为空，跳过原地更新")
         return
 
-    # 从消息数据中提取卡片 JSON
-    # 飞书 API 返回的 body 可能是 dict 或其他类型，需要防御性处理
-    body = msg_data.get('body', {})
-    if not isinstance(body, dict):
-        logger.warning("原卡片消息 body 格式异常: %s, 跳过原地更新", type(body).__name__)
-        return
-    content_str = body.get('content', '')
-    logger.debug("原卡片消息 content 类型: %s, 前500字符: %s", type(content_str).__name__, str(content_str)[:500])
-
-    # content 可能是 JSON 字符串，也可能是已解析的 dict/list
-    if isinstance(content_str, (dict, list)):
-        card = content_str
-    elif isinstance(content_str, str) and content_str:
-        try:
-            card = json.loads(content_str)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("原卡片消息 content 解析失败，跳过原地更新")
-            return
-    else:
-        logger.warning("原卡片消息 content 为空，跳过原地更新")
+    # 从数据库读取发送时保存的原始卡片 JSON
+    from alerts_format.savedb import get_card_content
+    content_str = get_card_content(maid)
+    if not content_str:
+        logger.warning("数据库中无原始卡片 JSON，跳过原地更新: maid=%s", maid)
         return
 
-    # 某些情况下飞书 API 返回的 content 外层多包了一层
-    # 例如 {"type":"raw","content":"{...卡片JSON...}"}
-    if isinstance(card, dict) and 'content' in card and isinstance(card['content'], str):
-        try:
-            inner = json.loads(card['content'])
-            if isinstance(inner, dict) and 'elements' in inner:
-                card = inner
-        except (json.JSONDecodeError, TypeError):
-            pass
+    try:
+        card = json.loads(content_str)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("原始卡片 JSON 解析失败，跳过原地更新: maid=%s", maid)
+        return
 
     if not isinstance(card, dict):
-        logger.warning("原卡片消息内容不是 dict，跳过原地更新: type=%s", type(card).__name__)
+        logger.warning("原始卡片内容不是 dict，跳过原地更新: maid=%s", maid)
         return
 
-    logger.debug("解析后的卡片 elements 数量: %d, elements 类型: %s",
-                 len(card.get('elements', [])), type(card.get('elements')).__name__)
-    for i, elem in enumerate(card.get('elements', [])):
-        logger.debug("  element[%d] type=%s tag=%s", i, type(elem).__name__,
-                     elem.get('tag') if isinstance(elem, dict) else 'N/A')
+    logger.debug("原始卡片 elements 数量: %d", len(card.get('elements', [])))
 
-    # ── 遍历 elements，将认领按钮改为禁用+已认领文案 ──
+    # ── 遍历 elements，将认领按钮改为禁用 ──
     operator_line = f"👤 认领人: <at id=\"{operator_id}\"></at>" if operator_id else "👤 认领人: 未知"
     elements = card.get('elements', [])
     for elem in elements:
@@ -530,9 +509,7 @@ def _update_card_after_ack(feishu_client, open_message_id, operator_id=None):
             if not isinstance(action, dict):
                 continue
 
-            # 多种方式识别认领按钮：
-            # 1. value.action == 'ack_incident'（原始发送格式）
-            # 2. 按钮文案包含"认领"（飞书返回时 value 可能被剥离）
+            # 通过 value 识别认领按钮（原始卡片 JSON 中 value 完整保留）
             value = action.get('value', {})
             is_ack_button = False
             if isinstance(value, dict) and value.get('action') == 'ack_incident':
@@ -545,22 +522,11 @@ def _update_card_after_ack(feishu_client, open_message_id, operator_id=None):
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            # 文案兜底识别
-            if not is_ack_button:
-                btn_text = action.get('text', {})
-                if isinstance(btn_text, dict):
-                    btn_content = btn_text.get('content', '')
-                    if '认领' in btn_content:
-                        is_ack_button = True
-                elif isinstance(btn_text, str) and '认领' in btn_text:
-                    is_ack_button = True
-
             if is_ack_button:
-                # 禁用按钮、清空 value 使其不可点击，文案保持"认领告警"不变
+                # 禁用按钮、清空 value 使其不可点击，文案保持不变
                 action['type'] = "default"
                 action['disabled'] = True
                 action['value'] = {}
-                # 同时移除可能存在的交互属性，确保按钮完全不可点击
                 action.pop('url', None)
                 action.pop('multi_url', None)
                 action.pop('behaviors', None)
