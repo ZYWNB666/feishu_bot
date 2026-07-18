@@ -22,7 +22,7 @@ from feishu_utils.feishu_api import FeishuApiClient, FeishuApiException
 from feishu_utils.ws_client import start_ws_client_in_thread
 
 # 配置日志（统一格式）
-logging.basicConfig(Co
+logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
