@@ -2,32 +2,42 @@
 """
 告警处理模块
 处理来自 Alertmanager 的告警请求
+
+优化点：
+- 去重缓存改用 BoundedTTLCache（带容量上限，防内存无限增长）
+- 魔法数字/字符串统一引用 config.constants
+- 缓存清理与去重检查原子化（mark 操作）
 """
 
 import hashlib
 import json
 import logging
 import threading
-import time
 
 from config.config import Config
+from config.constants import (
+    ALERT_DEDUP_TTL,
+    ALERT_LABEL_DEDUP_TTL,
+    ALERT_DEDUP_CACHE_MAXSIZE,
+    RESOLVED_DEDUP_TTL,
+)
+from utils.bounded_cache import BoundedTTLCache
 
 # ── 告警去重缓存（基于 fingerprint+status 哈希）──
-_alert_dedup_cache: dict[str, float] = {}
-_alert_dedup_lock = threading.Lock()
-_ALERT_DEDUP_TTL = 300  # 秒（5分钟）：防止 Grafana repeat_interval 重复投递同一 firing 告警
+# 使用带容量上限的 TTL 缓存，防止长时间运行后内存无限增长
+_alert_dedup_cache = BoundedTTLCache(maxsize=ALERT_DEDUP_CACHE_MAXSIZE, ttl=ALERT_DEDUP_TTL)
+_alert_dedup_lock = threading.Lock()  # 保留锁用于跨缓存的原子操作（如双向清除）
 
 # ── resolved 去重缓存（30 分钟 TTL，覆盖多个 Grafana repeat_interval 周期）──
-_resolved_dedup_cache: dict[str, float] = {}
+_resolved_dedup_cache = BoundedTTLCache(maxsize=ALERT_DEDUP_CACHE_MAXSIZE, ttl=RESOLVED_DEDUP_TTL)
 _resolved_dedup_lock = threading.Lock()
-_RESOLVED_DEDUP_TTL = 1800  # 秒（30分钟）：防止 Grafana repeat_interval 重复投递同一 resolved 告警
 
 # ── alertname+labels 维度去重缓存 ──
 # Grafana 不同评估周期的 fingerprint 可能不同（value 变化导致），
 # 单靠 fingerprint 去重无法拦截"同一告警规则重复触发"的情况。
 # 额外维护一个基于 alertname + group_id 的去重维度，
-# TTL 与 _ALERT_DEDUP_TTL 一致，确保同一告警在冷却期内不重复发送。
-_alert_label_dedup_cache: dict[str, float] = {}
+# TTL 与 ALERT_DEDUP_TTL 一致，确保同一告警在冷却期内不重复发送。
+_alert_label_dedup_cache = BoundedTTLCache(maxsize=ALERT_DEDUP_CACHE_MAXSIZE, ttl=ALERT_LABEL_DEDUP_TTL)
 _alert_label_dedup_lock = threading.Lock()
 
 
@@ -85,8 +95,7 @@ def _clear_dedup_for_resolved(data: dict) -> None:
     pairs = sorted(a.get('fingerprint', '') for a in data.get('alerts', []))
     raw = json.dumps(pairs, ensure_ascii=False, sort_keys=True)
     key = hashlib.md5(raw.encode()).hexdigest()
-    with _alert_dedup_lock:
-        _alert_dedup_cache.pop(key, None)
+    _alert_dedup_cache.pop(key, None)
 
 
 def _make_resolved_dedup_key(data: dict) -> str:
@@ -110,37 +119,33 @@ def _clear_resolved_dedup_for_firing(data: dict) -> None:
     )
     raw = json.dumps(pairs, ensure_ascii=False, sort_keys=True)
     key = hashlib.md5(raw.encode()).hexdigest()
-    with _resolved_dedup_lock:
-        _resolved_dedup_cache.pop(key, None)
+    _resolved_dedup_cache.pop(key, None)
 
 
-def _is_duplicate(key: str, cache: dict = None, lock: threading.Lock = None,
-                  ttl: int = _ALERT_DEDUP_TTL) -> bool:
-    """通用去重检查，支持自定义缓存、锁和 TTL
+def _is_duplicate(key: str, cache: BoundedTTLCache = None,
+                  lock: threading.Lock = None,
+                  ttl: int = ALERT_DEDUP_TTL) -> bool:
+    """通用去重检查，支持自定义缓存、锁和 TTL。
+
+    使用 BoundedTTLCache.mark() 原子化"检查并标记"操作，避免 check-then-set 竞态。
+    注意：BoundedTTLCache 在构造时已绑定 TTL，此处的 ttl 参数仅用于兼容旧签名，
+    实际以缓存自身的 TTL 为准。
 
     Args:
         key: 去重 key
-        cache: 缓存字典，默认使用 _alert_dedup_cache
-        lock: 线程锁，默认使用 _alert_dedup_lock
-        ttl: 缓存 TTL（秒），默认 5 分钟
+        cache: 缓存实例，默认使用 _alert_dedup_cache
+        lock: 线程锁（保留用于跨缓存原子操作），默认使用 _alert_dedup_lock
+        ttl: 兼容旧签名的 TTL 参数（实际以 cache 自身 TTL 为准）
     """
     if cache is None:
         cache = _alert_dedup_cache
     if lock is None:
         lock = _alert_dedup_lock
-    now = time.time()
-    with lock:
-        # 清理过期记录
-        expired = [k for k, t in cache.items() if now - t > ttl]
-        for k in expired:
-            del cache[k]
-        if key in cache:
-            return True
-        cache[key] = now
-        return False
+    # mark 内部已加锁，此处 lock 仅用于语义保留与跨缓存场景
+    return cache.mark(key)
 
 
-def _evict_dedup(key: str, cache: dict = None, lock: threading.Lock = None) -> None:
+def _evict_dedup(key: str, cache: BoundedTTLCache = None, lock: threading.Lock = None) -> None:
     """撤销去重缓存中的 key，用于处理失败后允许 Grafana 重试。
 
     _is_duplicate() 在处理前就写入缓存，若处理失败（无匹配配置、发送异常等），
@@ -153,15 +158,13 @@ def _evict_dedup(key: str, cache: dict = None, lock: threading.Lock = None) -> N
         lock = _alert_dedup_lock
     if not key:
         return
-    with lock:
-        cache.pop(key, None)
+    cache.pop(key, None)
 from alerts_format.flashcat_utils import get_oncall_open_ids, send_phone_alert, create_phone_incident
 from alerts_format.alert_json_format import (
     extract_all_labels,
     extract_alertids,
     extract_alertname,
     extract_alert_raw,
-    extract_grafana_urls,
     extract_fingerprints,
     alert_data_api,
 )
@@ -333,7 +336,7 @@ def process_alert_request(data, feishu_client):
             _clear_dedup_for_resolved(data)
             resolved_key = _make_resolved_dedup_key(data)
             if _is_duplicate(resolved_key, cache=_resolved_dedup_cache,
-                             lock=_resolved_dedup_lock, ttl=_RESOLVED_DEDUP_TTL):
+                             lock=_resolved_dedup_lock, ttl=RESOLVED_DEDUP_TTL):
                 logger.info("恢复告警重复，已跳过 (resolved_dedup_key=%s)", resolved_key)
                 return {"code": 0, "msg": "duplicate, skipped"}, 200
             active_dedup_key = resolved_key
@@ -387,7 +390,7 @@ def process_alert_request(data, feishu_client):
                 gid = config_row.get('group_id', '')
                 label_key = _make_label_dedup_key(data, gid)
                 if _is_duplicate(label_key, cache=_alert_label_dedup_cache,
-                                 lock=_alert_label_dedup_lock, ttl=_ALERT_DEDUP_TTL):
+                                 lock=_alert_label_dedup_lock, ttl=ALERT_LABEL_DEDUP_TTL):
                     logger.info("告警语义重复 (alertname='%s', group_id='%s')，跳过该路由",
                                 alertname, gid)
                     label_dedup_skipped.add(idx)
@@ -910,4 +913,3 @@ def _determine_alert_severity(severities):
         logger.info("最终告警级别: %s (优先级: %d)", alert_severity, max_priority)
     
     return alert_severity
-

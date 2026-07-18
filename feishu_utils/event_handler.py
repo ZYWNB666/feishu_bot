@@ -2,25 +2,38 @@
 """
 飞书事件处理模块
 统一处理各类飞书事件，包括机器人进群、用户进群等
+
+优化点：
+- 事件去重缓存改用 BoundedTTLCache（带容量上限，防内存无限增长）
+- 魔法数字统一引用 config.constants
+- 正则表达式（邮箱校验）改用 utils.regex_cache 缓存编译结果
 """
 
 import json
 import logging
-import re
 import threading
-import time
 from datetime import datetime
 
 from config.config import Config
+from config.constants import (
+    EVENT_CACHE_TTL,
+    EVENT_CACHE_MAXSIZE,
+    SILENCE_DURATION_2H,
+    SILENCE_DURATION_12H,
+    SILENCE_DURATION_24H,
+    SILENCE_DURATION_3D,
+)
 from jira_utils.jira_all_class import JiraClient
+from utils.bounded_cache import BoundedTTLCache
+from utils.regex_cache import compile_pattern, search as regex_search, match as regex_match
 from .bot_msg_format import bot_add_msg_to_group, user_add_msg_to_group
 
 logger = logging.getLogger(__name__)
 
 # 用于去重的缓存（存储最近处理过的事件ID）
-_event_cache = {}
-_event_cache_lock = threading.Lock()
-_EVENT_CACHE_EXPIRE_SECONDS = 3600  # 缓存1小时，防止重复处理
+# 使用带容量上限的 TTL 缓存，防止长时间运行后内存无限增长
+_event_cache = BoundedTTLCache(maxsize=EVENT_CACHE_MAXSIZE, ttl=EVENT_CACHE_TTL)
+_event_cache_lock = threading.Lock()  # 保留用于跨缓存原子操作
 
 
 def handle_bot_added_to_group(feishu_client, event_data):
@@ -280,8 +293,8 @@ def handle_message_received(feishu_client, event_data):
             # 飞书会把 test@osip.cc 转成 [test@osip.cc](mailto:test@osip.cc)
             email_input = parts[1].strip()
             
-            # 尝试从 markdown 链接格式中提取邮箱
-            mailto_match = re.search(r'\[([^\]]+)\]\(mailto:([^\)]+)\)', email_input)
+            # 尝试从 markdown 链接格式中提取邮箱（正则编译结果缓存）
+            mailto_match = regex_search(r'\[([^\]]+)\]\(mailto:([^\)]+)\)', email_input)
             if mailto_match:
                 # 使用 mailto: 后面的邮箱地址
                 email = mailto_match.group(2).strip()
@@ -289,9 +302,9 @@ def handle_message_received(feishu_client, event_data):
                 # 直接使用输入的内容
                 email = email_input
             
-            # 验证邮箱格式
+            # 验证邮箱格式（正则编译结果缓存）
             email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-            if not re.match(email_pattern, email):
+            if not regex_match(email_pattern, email):
                 error_card = {
                     "config": {"wide_screen_mode": True},
                     "header": {
@@ -339,8 +352,8 @@ def handle_message_received(feishu_client, event_data):
             
             # 调用 Jira 邀请接口
             try:
-                jira_client = JiraClient(config.JIRA_URL)
-                jira_client.login(config.JIRA_USERNAME, config.JIRA_PASSWORD)
+                jira_client = JiraClient(Config.JIRA_URL)
+                jira_client.login(Config.JIRA_USERNAME, Config.JIRA_PASSWORD)
                 
                 result = jira_client.invite_user(email)
                 
@@ -536,7 +549,7 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
                     "value": json.dumps({
                         "action": "silence",
                         "maid": maid,
-                        "duration": 7200  # 2小时
+                        "duration": SILENCE_DURATION_2H
                     })
                 },
                 {
@@ -549,7 +562,7 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
                     "value": json.dumps({
                         "action": "silence",
                         "maid": maid,
-                        "duration": 43200  # 12小时
+                        "duration": SILENCE_DURATION_12H
                     })
                 },
                 {
@@ -562,7 +575,7 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
                     "value": json.dumps({
                         "action": "silence",
                         "maid": maid,
-                        "duration": 86400  # 24小时
+                        "duration": SILENCE_DURATION_24H
                     })
                 },
                 {
@@ -575,7 +588,7 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
                     "value": json.dumps({
                         "action": "silence",
                         "maid": maid,
-                        "duration": 259200  # 3天
+                        "duration": SILENCE_DURATION_3D
                     })
                 }
             ]
@@ -640,7 +653,10 @@ def _get_current_time():
 def _is_duplicate_event(event_id):
     """
     检查是否为重复的事件（基于event_id去重）
-    
+
+    使用 BoundedTTLCache.mark() 原子化"检查并标记"操作，自带 TTL 过期清理
+    与容量上限淘汰，无需手动维护过期清理逻辑。
+
     Args:
         event_id: 飞书事件ID
         
@@ -649,23 +665,11 @@ def _is_duplicate_event(event_id):
     """
     if not event_id:
         return False
-    
-    current_time = time.time()
-    
-    with _event_cache_lock:
-        # 清理过期缓存（1小时前的事件）
-        expired_keys = [k for k, v in _event_cache.items() if current_time - v > _EVENT_CACHE_EXPIRE_SECONDS]
-        for k in expired_keys:
-            del _event_cache[k]
-        
-        # 检查是否重复
-        if event_id in _event_cache:
-            logger.warning("检测到重复事件，已忽略: event_id=%s", event_id)
-            return True
-        
-        # 记录此次事件
-        _event_cache[event_id] = current_time
-        return False
+
+    if _event_cache.mark(event_id):
+        logger.warning("检测到重复事件，已忽略: event_id=%s", event_id)
+        return True
+    return False
 
 
 def _process_event_async(feishu_client, event_type, data):

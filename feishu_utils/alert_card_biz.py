@@ -10,6 +10,8 @@
 import json
 from datetime import datetime
 
+from config.constants import SILENCE_DURATION_2H
+
 
 def _parse_ts(ts: str) -> datetime | None:
     """解析 alertmanager ISO 时间字符串"""
@@ -58,7 +60,7 @@ def _silence_buttons(maid: str) -> dict:
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "🔕 静默2小时"},
                 "type": "primary",
-                "value": {"action": "silence", "maid": maid, "duration": 7200},
+                "value": {"action": "silence", "maid": maid, "duration": SILENCE_DURATION_2H},
             },
         ],
     }
@@ -93,7 +95,7 @@ def _grafana_buttons(grafana_urls: dict, maid: str = None, incident_id: str = No
             "tag": "button",
             "text": {"tag": "plain_text", "content": "🔕 静默2小时"},
             "type": "primary",
-            "value": {"action": "silence", "maid": maid, "duration": 7200},
+            "value": {"action": "silence", "maid": maid, "duration": SILENCE_DURATION_2H},
         })
     return {"tag": "action", "actions": actions} if actions else None
 

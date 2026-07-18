@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
 飞书卡片交互回调处理模块
+
+优化点：
+- 回调去重缓存改用 BoundedTTLCache（带容量上限，防内存无限增长）
+- 魔法数字统一引用 config.constants
+- DB 访问改用连接池
+- 重试次数/退避使用常量
 """
 
 import json
@@ -8,17 +14,26 @@ import logging
 import threading
 import time
 from datetime import datetime
-import mysql.connector
 
 from alerts_format.ma import macreate, madelete
 from alerts_format.grafana_silence import grafana_create_silence, grafana_delete_silence
 from alerts_format.flashcat_utils import ack_incident
+from config.constants import (
+    CALLBACK_CACHE_TTL,
+    CALLBACK_CACHE_MAXSIZE,
+    MAX_RETRIES,
+    RETRY_BACKOFF_BASE,
+    DEFAULT_SILENCE_DURATION,
+)
+from db.pool import db_cursor
+from utils.bounded_cache import BoundedTTLCache
 
 logger = logging.getLogger(__name__)
 
 # 用于去重的缓存（存储最近处理过的回调）
-_callback_cache = {}
-_callback_cache_lock = threading.Lock()
+# 使用带容量上限的 TTL 缓存，防止长时间运行后内存无限增长
+_callback_cache = BoundedTTLCache(maxsize=CALLBACK_CACHE_MAXSIZE, ttl=CALLBACK_CACHE_TTL)
+_callback_cache_lock = threading.Lock()  # 保留用于跨缓存原子操作
 
 
 def _get_current_time():
@@ -30,37 +45,27 @@ def _get_silence_config_by_maid(maid: str) -> dict:
     """
     通过 maid 查找对应的 silence_type 和 grafana_url
     先从 alert_data 查 project，再从 alert_config 查路由配置
-    """
-    from config import config
-    connection = None
-    try:
-        db_config = config.get_alert_db_config()
-        connection = mysql.connector.connect(**db_config)
-        cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT project FROM alert_data WHERE id = %s", (maid,))
-        row = cursor.fetchone()
-        if not row or not row.get('project'):
-            return {}
-        project = row['project']
-        cursor.close()
 
-        # 查 alert_config
-        cfg_conn = mysql.connector.connect(**config.get_config_db_config())
-        cfg_cursor = cfg_conn.cursor(dictionary=True)
-        cfg_cursor.execute(
-            "SELECT silence_type, grafana_url FROM alert_config WHERE project = %s LIMIT 1",
-            (project,)
-        )
-        cfg_row = cfg_cursor.fetchone()
-        cfg_cursor.close()
-        cfg_conn.close()
-        return cfg_row or {}
+    使用连接池，两次查询复用同一连接，减少连接建立开销。
+    """
+    try:
+        with db_cursor(dictionary=True) as (conn, cursor):
+            cursor.execute("SELECT project FROM alert_data WHERE id = %s", (maid,))
+            row = cursor.fetchone()
+            if not row or not row.get('project'):
+                return {}
+            project = row['project']
+
+            # 查 alert_config（复用同一连接）
+            cursor.execute(
+                "SELECT silence_type, grafana_url FROM alert_config WHERE project = %s LIMIT 1",
+                (project,)
+            )
+            cfg_row = cursor.fetchone()
+            return cfg_row or {}
     except Exception as e:
         logger.error("查询 silence_config 失败: %s", e)
         return {}
-    finally:
-        if connection and connection.is_connected():
-            connection.close()
 
 
 def create_silence_success_card(maid, duration, operator_id=None):
@@ -552,19 +557,18 @@ def _update_card_after_ack(feishu_client, open_message_id, operator_id=None, mai
 
     # ── 调用 PATCH 接口原地更新（带 retry）──
     card_json = json.dumps(card, ensure_ascii=False)
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             feishu_client.patch_message(open_message_id, card_json)
-            logger.info("原卡片已原地更新为已认领状态: message_id=%s (attempt %d/%d)", open_message_id, attempt, max_retries)
+            logger.info("原卡片已原地更新为已认领状态: message_id=%s (attempt %d/%d)", open_message_id, attempt, MAX_RETRIES)
             return
         except Exception as e:
-            if attempt < max_retries:
-                wait = attempt * 2
-                logger.warning("原地更新卡片失败 (attempt %d/%d): %s, %d秒后重试", attempt, max_retries, e, wait)
+            if attempt < MAX_RETRIES:
+                wait = attempt * RETRY_BACKOFF_BASE
+                logger.warning("原地更新卡片失败 (attempt %d/%d): %s, %d秒后重试", attempt, MAX_RETRIES, e, wait)
                 time.sleep(wait)
             else:
-                logger.error("原地更新卡片失败（已重试 %d 次）: %s（不影响认领流程）", max_retries, e)
+                logger.error("原地更新卡片失败（已重试 %d 次）: %s（不影响认领流程）", MAX_RETRIES, e)
 
 
 def parse_callback_data(data):
@@ -624,8 +628,11 @@ def parse_callback_data(data):
 
 def is_duplicate_callback(action_type, action_value, open_message_id):
     """
-    检查是否为重复的回调请求（5秒内）
-    
+    检查是否为重复的回调请求（TTL 内）
+
+    使用 BoundedTTLCache.mark() 原子化"检查并标记"操作，自带 TTL 过期清理
+    与容量上限淘汰，无需手动维护过期清理逻辑。
+
     Args:
         action_type: 操作类型
         action_value: 操作值
@@ -635,22 +642,11 @@ def is_duplicate_callback(action_type, action_value, open_message_id):
         bool: True 表示重复，False 表示不重复
     """
     callback_key = f"{open_message_id}_{action_type}_{action_value.get('maid')}"
-    current_time = time.time()
-    
-    with _callback_cache_lock:
-        # 清理5秒前的缓存
-        expired_keys = [k for k, v in _callback_cache.items() if current_time - v > 5]
-        for k in expired_keys:
-            del _callback_cache[k]
-        
-        # 检查是否重复
-        if callback_key in _callback_cache:
-            logger.info("重复回调已忽略")
-            return True
-        
-        # 记录此次回调
-        _callback_cache[callback_key] = current_time
-        return False
+
+    if _callback_cache.mark(callback_key):
+        logger.info("重复回调已忽略")
+        return True
+    return False
 
 
 def process_card_callback(data, feishu_client):
@@ -683,7 +679,7 @@ def process_card_callback(data, feishu_client):
         # 处理静默操作
         if action_type == "silence":
             maid = action_value.get("maid")
-            duration = action_value.get("duration", 7200)
+            duration = action_value.get("duration", DEFAULT_SILENCE_DURATION)
             
             logger.info("执行静默操作")
             handle_silence_action(maid, duration, open_message_id, feishu_client, open_id)

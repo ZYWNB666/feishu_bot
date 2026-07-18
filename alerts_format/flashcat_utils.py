@@ -13,6 +13,8 @@ import time
 import logging
 import requests
 
+from config.constants import FLASHCAT_API_TIMEOUT, MAX_RETRIES, RETRY_BACKOFF_BASE
+
 logger = logging.getLogger(__name__)
 
 FLASHCAT_API_BASE = "https://api.flashcat.cloud"
@@ -36,7 +38,7 @@ def get_oncall_person_ids(app_key: str, schedule_id: int) -> list:
         "end": now + 86400,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, timeout=FLASHCAT_API_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
 
@@ -61,7 +63,7 @@ def get_person_names(app_key: str, person_ids: list) -> list:
         return []
     url = f"{FLASHCAT_API_BASE}/person/infos?app_key={app_key}"
     try:
-        resp = requests.post(url, json={"person_ids": person_ids}, timeout=10)
+        resp = requests.post(url, json={"person_ids": person_ids}, timeout=FLASHCAT_API_TIMEOUT)
         resp.raise_for_status()
         items = resp.json().get("data", {}).get("items", [])
         names = [item["person_name"] for item in items if item.get("person_name")]
@@ -145,7 +147,7 @@ def send_phone_alert(data: dict, integration_key: str) -> bool:
 
     url = f"{FLASHCAT_API_BASE}/event/push/alert/grafana?integration_key={integration_key}"
     try:
-        resp = requests.post(url, json=phone_data, timeout=10)
+        resp = requests.post(url, json=phone_data, timeout=FLASHCAT_API_TIMEOUT)
         resp.raise_for_status()
         logger.info("电话告警发送成功: status=%s body=%s", resp.status_code, resp.text[:200])
         return True
@@ -211,7 +213,7 @@ def create_phone_incident(data: dict, app_key: str, channel_id: str) -> str:
 
     url = f"{FLASHCAT_API_BASE}/incident/create?app_key={app_key}"
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, timeout=FLASHCAT_API_TIMEOUT)
         resp.raise_for_status()
         result = resp.json()
         incident_id = result.get("data", {}).get("incident_id", "")
@@ -245,18 +247,17 @@ def ack_incident(app_key: str, incident_id: str) -> bool:
 
     url = f"{FLASHCAT_API_BASE}/incident/ack?app_key={app_key}"
     payload = {"incident_ids": [incident_id]}
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(url, json=payload, timeout=10)
+            resp = requests.post(url, json=payload, timeout=FLASHCAT_API_TIMEOUT)
             resp.raise_for_status()
-            logger.info("Flashcat incident 认领成功: incident_id=%s (attempt %d/%d)", incident_id, attempt, max_retries)
+            logger.info("Flashcat incident 认领成功: incident_id=%s (attempt %d/%d)", incident_id, attempt, MAX_RETRIES)
             return True
         except Exception as e:
-            if attempt < max_retries:
-                wait = attempt * 2
-                logger.warning("认领 Flashcat incident 失败 (attempt %d/%d): %s, %d秒后重试", attempt, max_retries, e, wait)
+            if attempt < MAX_RETRIES:
+                wait = attempt * RETRY_BACKOFF_BASE
+                logger.warning("认领 Flashcat incident 失败 (attempt %d/%d): %s, %d秒后重试", attempt, MAX_RETRIES, e, wait)
                 time.sleep(wait)
             else:
-                logger.error("认领 Flashcat incident 失败 (已重试 %d 次): %s", max_retries, e)
+                logger.error("认领 Flashcat incident 失败 (已重试 %d 次): %s", MAX_RETRIES, e)
                 return False

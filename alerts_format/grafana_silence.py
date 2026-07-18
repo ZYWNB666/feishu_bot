@@ -11,76 +11,53 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-import mysql.connector
 import requests
 
 from config.config import Config
+from config.constants import SILENCE_API_TIMEOUT
+from db.pool import db_cursor
 
 logger = logging.getLogger(__name__)
 
 
 def _get_alert_data(maid: str) -> dict:
     """从 alert_data 取 alertlabels / project / silenceid"""
-    from config import config
-    connection = None
     try:
-        db_config = config.get_alert_db_config()
-        connection = mysql.connector.connect(**db_config)
-        cursor = connection.cursor(dictionary=True)
-        cursor.execute(
-            "SELECT alertlabels, project, silenceid FROM alert_data WHERE id = %s",
-            (maid,)
-        )
-        return cursor.fetchone() or {}
+        with db_cursor(dictionary=True) as (conn, cursor):
+            cursor.execute(
+                "SELECT alertlabels, project, silenceid FROM alert_data WHERE id = %s",
+                (maid,)
+            )
+            return cursor.fetchone() or {}
     except Exception as e:
         logger.error("读取 alert_data 失败: %s", e)
         return {}
-    finally:
-        if connection and connection.is_connected():
-            cursor.close()
-            connection.close()
 
 
 def _save_silence_ids(maid: str, silence_ids: list) -> None:
     """将 silence ID 列表写入 alert_data.silenceid"""
-    from config import config
-    connection = None
     try:
-        db_config = config.get_alert_db_config()
-        connection = mysql.connector.connect(**db_config)
-        cursor = connection.cursor()
-        cursor.execute(
-            "UPDATE alert_data SET silenceid = %s WHERE id = %s",
-            (json.dumps(silence_ids), maid)
-        )
-        connection.commit()
+        with db_cursor() as (conn, cursor):
+            cursor.execute(
+                "UPDATE alert_data SET silenceid = %s WHERE id = %s",
+                (json.dumps(silence_ids), maid)
+            )
+            conn.commit()
     except Exception as e:
         logger.error("保存 silence ID 失败: %s", e)
-    finally:
-        if connection and connection.is_connected():
-            cursor.close()
-            connection.close()
 
 
 def _clear_silence_ids(maid: str) -> None:
     """清空 alert_data.silenceid"""
-    from config import config
-    connection = None
     try:
-        db_config = config.get_alert_db_config()
-        connection = mysql.connector.connect(**db_config)
-        cursor = connection.cursor()
-        cursor.execute(
-            "UPDATE alert_data SET silenceid = NULL WHERE id = %s",
-            (maid,)
-        )
-        connection.commit()
+        with db_cursor() as (conn, cursor):
+            cursor.execute(
+                "UPDATE alert_data SET silenceid = NULL WHERE id = %s",
+                (maid,)
+            )
+            conn.commit()
     except Exception as e:
         logger.error("清空 silence ID 失败: %s", e)
-    finally:
-        if connection and connection.is_connected():
-            cursor.close()
-            connection.close()
 
 
 def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> dict:
@@ -134,7 +111,7 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
             "createdBy": "feishu_bot",
         }
         try:
-            resp = requests.post(url, headers=headers, json=body, timeout=30)
+            resp = requests.post(url, headers=headers, json=body, timeout=SILENCE_API_TIMEOUT)
             if resp.status_code in (200, 201, 202):
                 sid = resp.json().get('silenceID') or resp.json().get('id', '')
                 if sid:
@@ -187,7 +164,7 @@ def grafana_delete_silence(maid: str, grafana_url: str) -> dict:
     deleted = 0
     for sid in silence_ids:
         try:
-            resp = requests.delete(f"{base_url}/{sid}", headers=headers, timeout=30)
+            resp = requests.delete(f"{base_url}/{sid}", headers=headers, timeout=SILENCE_API_TIMEOUT)
             if resp.status_code in (200, 204):
                 deleted += 1
             else:
