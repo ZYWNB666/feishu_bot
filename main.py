@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 # 始终抑制 websockets 协议层心跳日志（keepalive ping/pong 对业务无意义）
 logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.getLogger("websockets.client").setLevel(logging.WARNING)
+# urllib3 DEBUG 日志会输出带 app_key/integration_key 的完整请求 URL。
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
 # 验证配置
 try:

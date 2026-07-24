@@ -64,7 +64,7 @@ def _get_silence_config_by_maid(maid: str) -> dict:
             cfg_row = cursor.fetchone()
             return cfg_row or {}
     except Exception as e:
-        logger.error("查询 silence_config 失败: %s", e)
+        logger.error("查询 silence_config 失败: maid=%s error=%s", maid, e)
         return {}
 
 
@@ -283,7 +283,7 @@ def handle_silence_action(maid, duration, open_message_id, feishu_client, operat
                     json.dumps(silence_card),
                     reply_in_thread=True,
                 )
-                logger.info("静默操作完成（%s）", silence_type)
+                logger.info("silence action completed: maid=%s silence_type=%s duration=%s operator_id=%s", maid, silence_type, duration, operator_id)
             else:
                 error_msg = silence_result.get('message', '未知错误')
                 failure_card = create_failure_card(maid, "静默", error_msg)
@@ -293,7 +293,10 @@ def handle_silence_action(maid, duration, open_message_id, feishu_client, operat
                     json.dumps(failure_card),
                     reply_in_thread=True,
                 )
-                logger.error("静默创建失败")
+                logger.error(
+                    "静默创建失败: maid=%s silence_type=%s error=%s",
+                    maid, silence_type, error_msg
+                )
         except Exception as e:
             failure_card = create_failure_card(maid, "静默", str(e))
             try:
@@ -305,7 +308,7 @@ def handle_silence_action(maid, duration, open_message_id, feishu_client, operat
                 )
             except Exception:
                 pass
-            logger.error("处理静默时出错: %s", e)
+            logger.error("处理静默时出错: maid=%s error=%s", maid, e)
 
     thread = threading.Thread(target=process_silence)
     thread.daemon = True
@@ -341,7 +344,7 @@ def handle_cancel_silence_action(maid, open_message_id, feishu_client, operator_
                     json.dumps(cancel_card),
                     reply_in_thread=True,
                 )
-                logger.info("取消静默操作完成（%s）", silence_type)
+                logger.info("cancel silence action completed: maid=%s silence_type=%s operator_id=%s", maid, silence_type, operator_id)
             else:
                 error_msg = delete_result.get('message', '未知错误')
                 failure_card = create_failure_card(maid, "取消静默", error_msg)
@@ -351,7 +354,10 @@ def handle_cancel_silence_action(maid, open_message_id, feishu_client, operator_
                     json.dumps(failure_card),
                     reply_in_thread=True,
                 )
-                logger.error("取消静默失败")
+                logger.error(
+                    "取消静默失败: maid=%s silence_type=%s error=%s",
+                    maid, silence_type, error_msg
+                )
         except Exception as e:
             failure_card = create_failure_card(maid, "取消静默", str(e))
             try:
@@ -363,7 +369,7 @@ def handle_cancel_silence_action(maid, open_message_id, feishu_client, operator_
                 )
             except Exception:
                 pass
-            logger.error("处理取消静默时出错: %s", e)
+            logger.error("处理取消静默时出错: maid=%s error=%s", maid, e)
 
     thread = threading.Thread(target=process_cancel_silence)
     thread.daemon = True
@@ -443,7 +449,7 @@ def handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client
             from config.config import Config
             app_key = Config.FLASHCAT_APP_KEY
             if not app_key:
-                logger.error("FLASHCAT_APP_KEY 未配置，无法认领 incident")
+                logger.error("FLASHCAT_APP_KEY 未配置，无法认领 incident: maid=%s", maid)
                 failure_card = create_failure_card(maid, "认领", "FLASHCAT_APP_KEY 未配置")
                 feishu_client.reply_message(
                     open_message_id,
@@ -453,7 +459,7 @@ def handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client
                 )
                 return
 
-            success = ack_incident(app_key, incident_id)
+            success = ack_incident(app_key, incident_id, maid=maid)
             if success:
                 # ── 原地更新原告警卡片（认领按钮改为禁用+已认领）──
                 _update_card_after_ack(feishu_client, open_message_id, operator_id, maid)
@@ -461,7 +467,10 @@ def handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client
             else:
                 logger.error("认领告警失败: maid=%s incident_id=%s", maid, incident_id)
         except Exception as e:
-            logger.error("处理认领告警时出错: %s", e)
+            logger.error(
+                "处理认领告警时出错: maid=%s incident_id=%s error=%s",
+                maid, incident_id, e
+            )
 
     thread = threading.Thread(target=process_ack)
     thread.daemon = True
@@ -501,7 +510,7 @@ def _update_card_after_ack(feishu_client, open_message_id, operator_id=None, mai
         logger.warning("原始卡片内容不是 dict，跳过原地更新: maid=%s", maid)
         return
 
-    logger.debug("原始卡片 elements 数量: %d", len(card.get('elements', [])))
+    logger.debug("原始卡片 elements 数量: maid=%s count=%d", maid, len(card.get('elements', [])))
 
     # ── 遍历 elements，将认领按钮改为禁用 ──
     operator_line = f"👤 认领人: <at id=\"{operator_id}\"></at>" if operator_id else "👤 认领人: 未知"
@@ -535,7 +544,10 @@ def _update_card_after_ack(feishu_client, open_message_id, operator_id=None, mai
                 action.pop('url', None)
                 action.pop('multi_url', None)
                 action.pop('behaviors', None)
-                logger.info("认领按钮已改为禁用状态: %s", json.dumps(action, ensure_ascii=False))
+                logger.info(
+                    "认领按钮已改为禁用状态: maid=%s action=%s",
+                    maid, json.dumps(action, ensure_ascii=False)
+                )
 
     # ── 在卡片末尾追加认领人信息 ──
     ack_note = {
@@ -560,15 +572,25 @@ def _update_card_after_ack(feishu_client, open_message_id, operator_id=None, mai
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             feishu_client.patch_message(open_message_id, card_json)
-            logger.info("原卡片已原地更新为已认领状态: message_id=%s (attempt %d/%d)", open_message_id, attempt, MAX_RETRIES)
+            logger.info(
+                "原卡片已原地更新为已认领状态: maid=%s message_id=%s attempt=%d/%d",
+                maid, open_message_id, attempt, MAX_RETRIES
+            )
             return
         except Exception as e:
             if attempt < MAX_RETRIES:
                 wait = attempt * RETRY_BACKOFF_BASE
-                logger.warning("原地更新卡片失败 (attempt %d/%d): %s, %d秒后重试", attempt, MAX_RETRIES, e, wait)
+                logger.warning(
+                    "原地更新卡片失败: maid=%s message_id=%s attempt=%d/%d "
+                    "error=%s retry_in=%ds",
+                    maid, open_message_id, attempt, MAX_RETRIES, e, wait
+                )
                 time.sleep(wait)
             else:
-                logger.error("原地更新卡片失败（已重试 %d 次）: %s（不影响认领流程）", MAX_RETRIES, e)
+                logger.error(
+                    "原地更新卡片失败: maid=%s message_id=%s attempts=%d error=%s（不影响认领流程）",
+                    maid, open_message_id, MAX_RETRIES, e
+                )
 
 
 def parse_callback_data(data):
@@ -644,7 +666,7 @@ def is_duplicate_callback(action_type, action_value, open_message_id):
     callback_key = f"{open_message_id}_{action_type}_{action_value.get('maid')}"
 
     if _callback_cache.mark(callback_key):
-        logger.info("重复回调已忽略")
+        logger.info("duplicate callback ignored: maid=%s action=%s message_id=%s", action_value.get('maid'), action_type, open_message_id)
         return True
     return False
 
@@ -660,6 +682,7 @@ def process_card_callback(data, feishu_client):
     Returns:
         dict: 响应数据
     """
+    maid = None
     try:
         # 解析回调数据
         action_type, action_value, open_message_id, open_id = parse_callback_data(data)
@@ -671,6 +694,8 @@ def process_card_callback(data, feishu_client):
         # 解析失败
         if action_type is None:
             return {}
+
+        maid = action_value.get("maid")
         
         # 去重检查
         if is_duplicate_callback(action_type, action_value, open_message_id):
@@ -678,36 +703,31 @@ def process_card_callback(data, feishu_client):
         
         # 处理静默操作
         if action_type == "silence":
-            maid = action_value.get("maid")
             duration = action_value.get("duration", DEFAULT_SILENCE_DURATION)
             
-            logger.info("执行静默操作")
+            logger.info("silence action received: maid=%s duration=%s message_id=%s operator_id=%s", maid, duration, open_message_id, open_id)
             handle_silence_action(maid, duration, open_message_id, feishu_client, open_id)
             return {}
         
         # 处理取消静默操作
         elif action_type == "cancel_silence":
-            maid = action_value.get("maid")
-            
-            logger.info("执行取消静默操作")
+            logger.info("cancel silence action received: maid=%s message_id=%s operator_id=%s", maid, open_message_id, open_id)
             handle_cancel_silence_action(maid, open_message_id, feishu_client, open_id)
             return {}
         
         # 处理认领告警操作
         elif action_type == "ack_incident":
-            maid = action_value.get("maid")
             incident_id = action_value.get("incident_id")
             
-            logger.info("执行认领告警操作: maid=%s incident_id=%s", maid, incident_id)
+            logger.info("ack action received: maid=%s incident_id=%s message_id=%s operator_id=%s", maid, incident_id, open_message_id, open_id)
             handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client, open_id)
             return {}
         
         # 未知操作
-        logger.warning("未知的操作类型: %s", action_type)
+        logger.warning("未知的操作类型: maid=%s action=%s", maid, action_type)
         return {}
         
     except Exception as e:
-        logger.error("处理卡片回调失败: %s", e, exc_info=True)
+        logger.error("处理卡片回调失败: maid=%s error=%s", maid, e, exc_info=True)
         # 即使失败也要返回空对象，避免用户看到错误提示
         return {}
-

@@ -30,7 +30,7 @@ def _get_alert_data(maid: str) -> dict:
             )
             return cursor.fetchone() or {}
     except Exception as e:
-        logger.error("读取 alert_data 失败: %s", e)
+        logger.error("读取 alert_data 失败: maid=%s error=%s", maid, e)
         return {}
 
 
@@ -44,7 +44,7 @@ def _save_silence_ids(maid: str, silence_ids: list) -> None:
             )
             conn.commit()
     except Exception as e:
-        logger.error("保存 silence ID 失败: %s", e)
+        logger.error("保存 silence ID 失败: maid=%s error=%s", maid, e)
 
 
 def _clear_silence_ids(maid: str) -> None:
@@ -57,7 +57,7 @@ def _clear_silence_ids(maid: str) -> None:
             )
             conn.commit()
     except Exception as e:
-        logger.error("清空 silence ID 失败: %s", e)
+        logger.error("清空 silence ID 失败: maid=%s error=%s", maid, e)
 
 
 def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> dict:
@@ -75,6 +75,7 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
     if not grafana_url:
         return {"success": False, "message": "未配置 grafana_url"}
 
+    logger.info("Grafana silence create started: maid=%s duration_hours=%s grafana_url=%s", maid, duration_hours, grafana_url)
     row = _get_alert_data(maid)
     if not row:
         return {"success": False, "message": f"未找到 MAID={maid} 的记录"}
@@ -116,11 +117,14 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
                 sid = resp.json().get('silenceID') or resp.json().get('id', '')
                 if sid:
                     silence_ids.append(sid)
-                    logger.info("Grafana 静默创建成功: %s", sid)
+                    logger.info("Grafana silence created: maid=%s silence_id=%s", maid, sid)
             else:
-                logger.error("Grafana 静默创建失败: %s %s", resp.status_code, resp.text)
+                logger.error(
+                    "Grafana 静默创建失败: maid=%s status=%s body=%s",
+                    maid, resp.status_code, resp.text
+                )
         except Exception as e:
-            logger.error("调用 Grafana silence API 异常: %s", e)
+            logger.error("调用 Grafana silence API 异常: maid=%s error=%s", maid, e)
 
     if silence_ids:
         _save_silence_ids(maid, silence_ids)
@@ -146,6 +150,7 @@ def grafana_delete_silence(maid: str, grafana_url: str) -> dict:
     if not grafana_url:
         return {"success": False, "message": "未配置 grafana_url"}
 
+    logger.info("Grafana silence delete started: maid=%s grafana_url=%s", maid, grafana_url)
     row = _get_alert_data(maid)
     if not row:
         return {"success": False, "message": f"未找到 MAID={maid} 的记录"}
@@ -167,10 +172,17 @@ def grafana_delete_silence(maid: str, grafana_url: str) -> dict:
             resp = requests.delete(f"{base_url}/{sid}", headers=headers, timeout=SILENCE_API_TIMEOUT)
             if resp.status_code in (200, 204):
                 deleted += 1
+                logger.info("Grafana silence deleted: maid=%s silence_id=%s", maid, sid)
             else:
-                logger.error("Grafana 删除静默失败: %s %s", resp.status_code, resp.text)
+                logger.error(
+                    "Grafana 删除静默失败: maid=%s silence_id=%s status=%s body=%s",
+                    maid, sid, resp.status_code, resp.text
+                )
         except Exception as e:
-            logger.error("调用 Grafana delete silence 异常: %s", e)
+            logger.error(
+                "调用 Grafana delete silence 异常: maid=%s silence_id=%s error=%s",
+                maid, sid, e
+            )
 
     _clear_silence_ids(maid)
     return {

@@ -73,9 +73,13 @@ def save_dbdata(post_data, project, group_id=None):
                 random_number, json_data_to_insert, project, startsAtTime, fingerprints_json, group_id
             ))
             conn.commit()
+            logger.info(
+                "告警数据已入库: maid=%s project=%s group_id=%s fingerprints=%s alerttime=%s",
+                random_number, project, group_id, fingerprints, startsAtTime
+            )
             return random_number
     except Error as e:
-        logger.error("连接或插入数据时出错：%s", e)
+        logger.error("连接或插入告警数据时出错: maid=%s error=%s", random_number, e)
         return None
 
 
@@ -92,7 +96,7 @@ def update_message_id(maid: str, message_id: str) -> None:
             conn.commit()
             logger.debug("已将 message_id=%s 写入 maid=%s", message_id, maid)
     except Error as e:
-        logger.error("更新 message_id 失败: %s", e)
+        logger.error("更新 message_id 失败: maid=%s error=%s", maid, e)
 
 
 def update_incident_id(maid: str, incident_id: str) -> None:
@@ -108,7 +112,7 @@ def update_incident_id(maid: str, incident_id: str) -> None:
             conn.commit()
             logger.debug("已将 incident_id=%s 写入 maid=%s", incident_id, maid)
     except Error as e:
-        logger.error("更新 incident_id 失败: %s", e)
+        logger.error("更新 incident_id 失败: maid=%s error=%s", maid, e)
 
 
 def get_incident_id_by_maid(maid: str) -> str:
@@ -124,7 +128,7 @@ def get_incident_id_by_maid(maid: str) -> str:
             row = cursor.fetchone()
             return row[0] if row and row[0] else ''
     except Error as e:
-        logger.error("查询 incident_id 失败: %s", e)
+        logger.error("查询 incident_id 失败: maid=%s error=%s", maid, e)
         return ''
 
 
@@ -141,7 +145,7 @@ def save_card_content(maid: str, card_content: str) -> None:
             conn.commit()
             logger.debug("已将 card_content 写入 maid=%s (len=%d)", maid, len(card_content))
     except Error as e:
-        logger.error("保存 card_content 失败: %s", e)
+        logger.error("保存 card_content 失败: maid=%s error=%s", maid, e)
 
 
 def get_card_content(maid: str) -> str:
@@ -157,7 +161,42 @@ def get_card_content(maid: str) -> str:
             row = cursor.fetchone()
             return row[0] if row and row[0] else ''
     except Error as e:
-        logger.error("查询 card_content 失败: %s", e)
+        logger.error("查询 card_content 失败: maid=%s error=%s", maid, e)
+        return ''
+
+
+def get_maid_by_fingerprints(fingerprints: list, group_id: str = None) -> str:
+    """通过 resolved 包的 fingerprint 反查最近一条 firing 告警的 MAID。"""
+    if not fingerprints:
+        return ''
+    try:
+        with db_cursor() as (conn, cursor):
+            for fingerprint in fingerprints:
+                if not fingerprint:
+                    continue
+                if group_id:
+                    cursor.execute(
+                        "SELECT id FROM alert_data "
+                        "WHERE JSON_CONTAINS(fingerprints, %s) AND group_id = %s "
+                        "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
+                        (json.dumps(fingerprint), group_id)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id FROM alert_data "
+                        "WHERE JSON_CONTAINS(fingerprints, %s) "
+                        "ORDER BY created_at DESC, alerttime DESC LIMIT 1",
+                        (json.dumps(fingerprint),)
+                    )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    return row[0]
+        return ''
+    except Error as e:
+        logger.error(
+            "通过 fingerprint 反查 MAID 失败: group_id=%s fingerprints=%s error=%s",
+            group_id, fingerprints, e
+        )
         return ''
 
 

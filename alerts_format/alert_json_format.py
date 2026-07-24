@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from .savedb import save_dbdata
+from .savedb import get_maid_by_fingerprints, save_dbdata
 
 # 定义要过滤的label前缀
 LABEL_FILTER_PREFIXES = [
@@ -73,6 +73,15 @@ def alert_data_api(alert_info_data, project, alertmanager_url, group_id=None):
     :return: tuple, (alerts列表, severities列表, maid, grafana_urls)
     """
     dbid = save_dbdata(alert_info_data, project, group_id=group_id)
+    if not dbid:
+        alert_statuses = [
+            alert.get('status') for alert in alert_info_data.get('alerts', [])
+        ]
+        if alert_statuses and all(status == 'resolved' for status in alert_statuses):
+            dbid = get_maid_by_fingerprints(
+                extract_fingerprints(alert_info_data),
+                group_id=group_id,
+            )
     alerts = []
     severities = []
 

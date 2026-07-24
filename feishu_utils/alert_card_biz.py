@@ -8,9 +8,59 @@
 """
 
 import json
+import logging
 from datetime import datetime
 
 from config.constants import SILENCE_DURATION_2H
+
+logger = logging.getLogger(__name__)
+
+BIZ_CARD_MAX_BYTES = 24 * 1024
+BIZ_CARD_MAX_INSTANCES = 8
+BIZ_CARD_MAX_LABELS = 12
+BIZ_CARD_MAX_LABEL_VALUE_LENGTH = 300
+BIZ_CARD_MAX_DESCRIPTION_LENGTH = 1000
+
+
+def _truncate_text(value, limit: int) -> str:
+    """Keep user-provided card text bounded while preserving a visible truncation marker."""
+    text = str(value) if value is not None else ""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit - 3]}..."
+
+
+def _label_fields(labels: dict) -> list:
+    """Build a bounded list of card fields from labels."""
+    if not isinstance(labels, dict):
+        return []
+    items = list(labels.items())
+    fields = [
+        {
+            "is_short": True,
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"**{_truncate_text(key, 100)}**\n"
+                    f"{_truncate_text(value, BIZ_CARD_MAX_LABEL_VALUE_LENGTH)}"
+                ),
+            },
+        }
+        for key, value in items[:BIZ_CARD_MAX_LABELS]
+    ]
+    if len(items) > BIZ_CARD_MAX_LABELS:
+        fields.append({
+            "is_short": True,
+            "text": {
+                "tag": "lark_md",
+                "content": f"**其他标签**\n已省略 {len(items) - BIZ_CARD_MAX_LABELS} 项",
+            },
+        })
+    return fields
+
+
+def _card_size_bytes(card: dict) -> int:
+    return len(json.dumps(card, ensure_ascii=False).encode("utf-8"))
 
 
 def _parse_ts(ts: str) -> datetime | None:
@@ -149,8 +199,7 @@ def build_biz_firing_card(
     _label_blacklist = {'alertname', 'grafana_folder', 'severity', 'alertid', 'model_name'}
     common_display = {k: v for k, v in (common_labels or {}).items() if k not in _label_blacklist}
     if common_display:
-        field_items = [{"is_short": True, "text": {"tag": "lark_md", "content": f"**{k}**\n{v}"}}
-                       for k, v in common_display.items()]
+        field_items = _label_fields(common_display)
         elements.append({"tag": "div", "fields": field_items})
         elements.append({"tag": "hr"})
 
@@ -159,49 +208,55 @@ def build_biz_firing_card(
     if not firing_alerts:
         # 没有 firing 实例，不应进入此函数，返回空字符串由调用方跳过
         return ''
-    for alert in firing_alerts:
+    instance_blocks = []
+    for alert in firing_alerts[:BIZ_CARD_MAX_INSTANCES]:
+        block = []
         status_icon = "🔥"
         # 特有标签
         spec_labels = alert.get('labels', {})
         if spec_labels:
-            field_items = [{"is_short": True, "text": {"tag": "lark_md", "content": f"**{k}**\n{v}"}}
-                           for k, v in spec_labels.items()]
-            elements.append({
+            field_items = _label_fields(spec_labels)
+            block.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": f"{status_icon} **告警实例**"},
             })
-            elements.append({"tag": "div", "fields": field_items})
+            block.append({"tag": "div", "fields": field_items})
         # annotations
         annotations = alert.get('annotations', {})
         desc = annotations.get('description') or annotations.get('summary', '')
         if desc:
-            elements.append({
+            block.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**📝 描述：**\n<font color='orange'>{desc}</font>",
+                    "content": (
+                        "**📝 描述：**\n<font color='orange'>"
+                        f"{_truncate_text(desc, BIZ_CARD_MAX_DESCRIPTION_LENGTH)}</font>"
+                    ),
                 },
             })
         # 触发时间
         starts_at = (alert.get('startsAt') or '').replace('T', ' ').replace('Z', '')[:19]
         if starts_at:
-            elements.append({
+            block.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": f"⏱ **触发时间：** {starts_at}"},
             })
-        elements.append({"tag": "hr"})
+        block.append({"tag": "hr"})
+        instance_blocks.append(block)
 
     # Grafana URL 按钮 + 认领按钮 + 静默按钮（同一行）
+    footer_elements = []
     grafana_btn = _grafana_buttons(grafana_urls, maid, incident_id)
     if grafana_btn:
-        elements.append(grafana_btn)
+        footer_elements.append(grafana_btn)
     elif maid:
         # 没有 Grafana URL 时单独显示静默按钮
-        elements.append(_silence_buttons(maid))
+        footer_elements.append(_silence_buttons(maid))
 
     # MAID 展示
     if maid:
-        elements.append({
+        footer_elements.append({
             "tag": "note",
             "elements": [{"tag": "plain_text", "content": f"⚠️ MAID: {maid}"}],
         })
@@ -214,14 +269,56 @@ def build_biz_firing_card(
     }
     severity_label = severity_label_map.get(severity.lower(), severity) if severity else ""
 
-    card = {
-        "config": {"wide_screen_mode": True, "update_multi": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": f"🔔 {alertname}" + (f"  [{severity_label}]" if severity_label else "")},
-            "template": template_color,
+    header = {
+        "title": {
+            "tag": "plain_text",
+            "content": f"🔔 {alertname}" + (f"  [{severity_label}]" if severity_label else ""),
         },
-        "elements": elements,
+        "template": template_color,
     }
+
+    prefix_elements = list(elements)
+
+    def compose_card(blocks: list) -> dict:
+        card_elements = list(prefix_elements)
+        shown = len(blocks)
+        if len(firing_alerts) > shown:
+            card_elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"**⚠️ 实例数量较多：共 {len(firing_alerts)} 个，"
+                        f"当前卡片展示前 {shown} 个。**"
+                    ),
+                },
+            })
+            card_elements.append({"tag": "hr"})
+        for block in blocks:
+            card_elements.extend(block)
+        card_elements.extend(footer_elements)
+        return {
+            "config": {"wide_screen_mode": True, "update_multi": True},
+            "header": header,
+            "elements": card_elements,
+        }
+
+    selected_blocks = list(instance_blocks)
+    card = compose_card(selected_blocks)
+    while selected_blocks and _card_size_bytes(card) > BIZ_CARD_MAX_BYTES:
+        selected_blocks.pop()
+        card = compose_card(selected_blocks)
+
+    card_bytes = _card_size_bytes(card)
+    logger.info(
+        "biz firing 卡片构建完成: maid=%s total_instances=%d shown_instances=%d bytes=%d",
+        maid, len(firing_alerts), len(selected_blocks), card_bytes
+    )
+    if card_bytes > BIZ_CARD_MAX_BYTES:
+        logger.warning(
+            "biz firing 卡片基础内容仍超过体积预算: maid=%s bytes=%d budget=%d",
+            maid, card_bytes, BIZ_CARD_MAX_BYTES
+        )
     return json.dumps(card, ensure_ascii=False)
 
 

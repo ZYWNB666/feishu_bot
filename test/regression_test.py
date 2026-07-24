@@ -162,6 +162,134 @@ class AlertStatsTests(unittest.TestCase):
         self.assertEqual(result, [{"alertname": "DiskFull", "count": 2}])
 
 
+class AlertLifecycleTests(unittest.TestCase):
+    def test_resolved_alert_reuses_firing_maid(self):
+        from alerts_format import alert_json_format
+
+        data = {
+            "status": "resolved",
+            "alerts": [{
+                "status": "resolved",
+                "fingerprint": "fp-1",
+                "labels": {"alertname": "NodeIsNotReady", "severity": "phone"},
+            }],
+        }
+        with (
+            patch.object(alert_json_format, "save_dbdata", return_value=None),
+            patch.object(
+                alert_json_format,
+                "get_maid_by_fingerprints",
+                return_value="maid-1",
+            ) as lookup,
+        ):
+            _, _, maid, _ = alert_json_format.alert_data_api(
+                data,
+                "test-project",
+                "http://alertmanager.test",
+                group_id="chat-1",
+            )
+
+        self.assertEqual(maid, "maid-1")
+        lookup.assert_called_once_with(["fp-1"], group_id="chat-1")
+
+    def test_firing_alert_keeps_newly_created_maid(self):
+        from alerts_format import alert_json_format
+
+        data = {
+            "status": "firing",
+            "alerts": [{
+                "status": "firing",
+                "fingerprint": "fp-1",
+                "labels": {"alertname": "NodeIsNotReady", "severity": "phone"},
+            }],
+        }
+        with (
+            patch.object(alert_json_format, "save_dbdata", return_value="maid-new"),
+            patch.object(alert_json_format, "get_maid_by_fingerprints") as lookup,
+        ):
+            _, _, maid, _ = alert_json_format.alert_data_api(
+                data,
+                "test-project",
+                "http://alertmanager.test",
+                group_id="chat-1",
+            )
+
+        self.assertEqual(maid, "maid-new")
+        lookup.assert_not_called()
+
+    def test_large_biz_card_is_bounded_and_keeps_actions(self):
+        import json
+
+        from feishu_utils.alert_card_biz import (
+            BIZ_CARD_MAX_BYTES,
+            BIZ_CARD_MAX_INSTANCES,
+            build_biz_firing_card,
+        )
+
+        raw_alerts = [
+            {
+                "status": "firing",
+                "labels": {
+                    "pod": f"mars2-pod-{index}",
+                    "model_name": "model-" + ("x" * 500),
+                },
+                "annotations": {"description": "failure " + ("detail " * 500)},
+                "startsAt": "2026-07-24T14:33:40+08:00",
+            }
+            for index in range(119)
+        ]
+        content = build_biz_firing_card(
+            "Mars2-Pod-Status-Error",
+            "p0",
+            raw_alerts,
+            {"panelURL": "https://grafana.test/panel"},
+            "maid-large",
+            {"namespace": "model-serving"},
+            ["ou_test"],
+        )
+        card = json.loads(content)
+
+        self.assertLessEqual(len(content.encode("utf-8")), BIZ_CARD_MAX_BYTES)
+        self.assertIn("共 119 个", content)
+        self.assertIn(f"展示前 {BIZ_CARD_MAX_INSTANCES} 个", content)
+        self.assertIn("maid-large", content)
+        self.assertTrue(
+            any(element.get("tag") == "action" for element in card["elements"])
+        )
+
+    def test_aggregated_batch_returns_500_when_every_route_fails(self):
+        from feishu_utils import alert_handler
+
+        data = {
+            "status": "firing",
+            "alerts": [
+                {
+                    "status": "firing",
+                    "fingerprint": f"aggregate-fp-{index}",
+                    "labels": {
+                        "alertname": "Mars2-Pod-Status-Error",
+                        "severity": "p0",
+                    },
+                }
+                for index in range(2)
+            ],
+        }
+        config_row = {
+            "alert_id": "alert-1",
+            "group_id": "chat-1",
+            "project": "test-project",
+        }
+        with (
+            patch.object(alert_handler, "_find_alert_configs", return_value=[config_row]),
+            patch.object(alert_handler, "_process_single_alert_config", return_value=None),
+        ):
+            result, status_code = alert_handler.process_alert_request(data, object())
+
+        self.assertEqual(status_code, 500)
+        self.assertEqual(result["code"], 500)
+        self.assertEqual(result["summary"]["failed"], 1)
+
+
 class RouteTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

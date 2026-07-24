@@ -159,7 +159,12 @@ def _evict_dedup(key: str, cache: BoundedTTLCache = None, lock: threading.Lock =
     if not key:
         return
     cache.pop(key, None)
-from alerts_format.flashcat_utils import get_oncall_open_ids, send_phone_alert, create_phone_incident
+from alerts_format.flashcat_utils import (
+    get_oncall_open_ids,
+    send_phone_alert,
+    create_phone_incident,
+    create_phone_incident_from_event,
+)
 from alerts_format.alert_json_format import (
     extract_all_labels,
     extract_alertids,
@@ -313,19 +318,35 @@ def process_alert_request(data, feishu_client):
             all_failed = 0
             all_total = 0
             for sub in sub_payloads:
-                resp, _ = process_alert_request(sub, feishu_client)
+                resp, child_status = process_alert_request(sub, feishu_client)
                 summary = resp.get('summary', {})
-                all_total += summary.get('total', 1)
-                all_failed += summary.get('failed', 0)
+                child_total = summary.get('total') or len(resp.get('data', [])) or 1
+                if 'failed' in summary:
+                    child_failed = summary['failed']
+                elif child_status >= 400 or resp.get('code', 0) >= 400:
+                    child_failed = child_total
+                else:
+                    child_failed = sum(
+                        1 for item in resp.get('data', [])
+                        if item.get('success') is False
+                    )
+                all_total += child_total
+                all_failed += child_failed
                 if 'data' in resp:
                     all_responses.extend(resp['data'])
             success_count = all_total - all_failed
+            all_routes_failed = all_total > 0 and all_failed == all_total
             return {
-                "code": 0,
-                "msg": "success" if all_failed == 0 else f"部分成功 ({success_count}/{all_total})",
+                "code": 500 if all_routes_failed else 0,
+                "msg": (
+                    "所有路由发送失败"
+                    if all_routes_failed
+                    else "success" if all_failed == 0
+                    else f"部分成功 ({success_count}/{all_total})"
+                ),
                 "data": all_responses,
                 "summary": {"total": all_total, "success": success_count, "failed": all_failed}
-            }, 200
+            }, 500 if all_routes_failed else 200
 
         # 去重逻辑（第一层：fingerprint 级别）：
         # - firing 批次：5 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递）
@@ -553,9 +574,18 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         config_row.get('alertmanager_url'),
         group_id=config_row.get('group_id'),
     )
-
     # 判断是否为 resolved 告警（原始顶层 status=resolved 且所有 alert 都是 resolved）
     is_resolved = _is_all_resolved(data)
+    logger.info(
+        "alert lifecycle started: maid=%s alertname=%s group_id=%s project=%s status=%s",
+        maid, alertname, config_row.get('group_id'), config_row.get('project'),
+        "resolved" if is_resolved else "firing"
+    )
+    if is_resolved and not maid:
+        logger.warning(
+            "resolved 告警未关联到原 MAID: maid=%s group_id=%s fingerprints=%s",
+            maid, config_row.get('group_id'), extract_fingerprints(data)
+        )
 
     # 判断是否符合 @ 条件（恢复通知不艾特任何人，只在 firing 时艾特）
     rank = config_row.get('rank', '')
@@ -569,20 +599,25 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         mentioned_user_list = []
     elif is_phone_alert:
         # 电话告警：强制获取 oncall 值班人进行艾特（仅 firing 艾特，resolved 不艾特）
-        mentioned_user_list = _get_oncall_mentioned_users(config_row)
-        logger.info("检测到 phone 级别告警，oncall 艾特用户数 %d", len(mentioned_user_list))
+        mentioned_user_list = _get_oncall_mentioned_users(config_row, maid=maid)
+        logger.info(
+            "检测到 phone 级别告警: maid=%s oncall_users=%d",
+            maid, len(mentioned_user_list)
+        )
     elif severity_matches:
         if config_row.get('oncall_sync'):
-            mentioned_user_list = _get_oncall_mentioned_users(config_row)
+            mentioned_user_list = _get_oncall_mentioned_users(config_row, maid=maid)
         else:
             mentioned_user_list = json.loads(config_row['users']) if config_row.get('users') else []
-        logger.info("符合@条件的告警级别 %s | 此告警的级别 %s | 艾特用户数 %d",
-                    rank, severities, len(mentioned_user_list))
+        logger.info(
+            "符合@条件: maid=%s configured_rank=%s severities=%s mentioned_users=%d",
+            maid, rank, severities, len(mentioned_user_list)
+        )
     else:
         mentioned_user_list = []
 
     # 确定告警级别
-    alert_severity = _determine_alert_severity(severities)
+    alert_severity = _determine_alert_severity(severities, maid=maid)
 
     # 判断模板类型（默认 ops）
     template_type = config_row.get('template_type', 'ops')
@@ -592,7 +627,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
     # 创建 Flashcat incident 以触发电话通知，返回 incident_id 用于卡片认领按钮
     incident_id = None
     if is_phone_alert and not is_resolved:
-        logger.info("📞 触发电话告警（firing），创建 Flashcat incident")
+        logger.info("trigger phone alert and create Flashcat incident: maid=%s", maid)
         incident_id = _create_phone_incident(data, maid)
 
     # ---------- resolved 告警：尝试在话题中回复 ----------
@@ -616,8 +651,8 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
                 remaining = [fp for fp in all_original_fps if fp not in resolved_set]
                 logger.info(
                     "⏸ 部分恢复检测：原始 %d 个实例，当前 resolved %d 个，"
-                    "仍有 %d 个实例未恢复，跳过恢复通知 group_id=%s",
-                    len(all_original_fps), len(fingerprints), len(remaining), group_id
+                    "仍有 %d 个实例未恢复，跳过恢复通知 maid=%s group_id=%s",
+                    len(all_original_fps), len(fingerprints), len(remaining), maid, group_id
                 )
                 return {
                     'alert_id': config_row.get('alert_id'),
@@ -640,12 +675,15 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             common_labels = data.get('commonLabels', {})
             content = build_biz_resolved_card(alertname, raw_alerts, grafana_urls, common_labels, mentioned_user_list)
         else:
-            string_alert_info = _build_alert_message(alerts)
+            string_alert_info = _build_alert_message(alerts, maid=maid)
             content = _build_ops_resolved_content(string_alert_info, alertname, mentioned_user_list)
 
         if not thread_message_id:
             # 找不到源消息，无法在话题中回复，跳过不发送
-            logger.warning("⚠️ 未找到源消息，跳过恢复告警通知 group_id=%s fingerprints=%s", group_id, fingerprints)
+            logger.warning(
+                "⚠️ 未找到源消息，跳过恢复告警通知: maid=%s group_id=%s fingerprints=%s",
+                maid, group_id, fingerprints
+            )
             return {
                 'alert_id': config_row.get('alert_id'),
                 'group_id': group_id,
@@ -656,11 +694,17 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
 
         try:
             feishu_client.reply_message(thread_message_id, 'interactive', content, reply_in_thread=True)
-            logger.info("✅ 已在话题中回复恢复通知，原消息: %s", thread_message_id)
+            logger.info(
+                "✅ 已在话题中回复恢复通知: maid=%s message_id=%s",
+                maid, thread_message_id
+            )
             return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': True}
         except Exception as e:
             # 话题回复失败，不降级为新消息，避免恢复通知脱离上下文
-            logger.error("❌ 话题回复失败，跳过恢复告警通知: %s", e)
+            logger.error(
+                "❌ 话题回复失败，跳过恢复告警通知: maid=%s message_id=%s error=%s",
+                maid, thread_message_id, e
+            )
             return {
                 'alert_id': config_row.get('alert_id'),
                 'group_id': group_id,
@@ -679,16 +723,16 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             alertname, alert_severity, raw_alerts, grafana_urls, maid, common_labels, mentioned_user_list, incident_id
         )
         if not content:
-            logger.info("biz firing 卡片无 firing 实例，跳过发送 group_id=%s", group_id)
+            logger.info("biz firing 卡片无 firing 实例，跳过发送: maid=%s group_id=%s", maid, group_id)
             return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': True}
         try:
             message_id = feishu_client.send("chat_id", group_id, "interactive", content)
         except Exception as e:
-            logger.error("biz 卡片发送失败: %s", e)
+            logger.error("biz 卡片发送失败: maid=%s error=%s", maid, e)
             message_id = ''
     else:
         # ops 模板走原有 alert_to_feishu
-        string_alert_info = _build_alert_message(alerts)
+        string_alert_info = _build_alert_message(alerts, maid=maid)
         message_id = alert_to_feishu(
             feishu_client,
             string_alert_info,
@@ -703,13 +747,16 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         content = None
 
     if message_id:
+        logger.info(
+            "alert message sent: maid=%s message_id=%s group_id=%s severity=%s incident_id=%s",
+            maid, message_id, group_id, alert_severity, incident_id
+        )
         # 保存 message_id 供后续 resolved/静默话题回复
         if maid:
             update_message_id(maid, message_id)
             # 保存原始卡片 JSON，认领时原地更新卡片使用（仅 biz 模板）
             if incident_id and content:
                 save_card_content(maid, content)
-        logger.info("✅ 发送告警信息成功，群组: %s，级别: %s", group_id, alert_severity)
         return {
             'alert_id': config_row.get('alert_id'),
             'group_id': group_id,
@@ -717,11 +764,11 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             'success': True,
         }
     else:
-        logger.error("❌ 发送告警信息失败，群组: %s", group_id)
+        logger.error("alert message send failed: maid=%s group_id=%s", maid, group_id)
         return None
 
 
-def _get_oncall_mentioned_users(config_row: dict) -> list:
+def _get_oncall_mentioned_users(config_row: dict, maid: str = None) -> list:
     """从 Flashcat 获取当前 oncall 人员的飞书 open_id 列表
 
     当 alert_config.oncall_sync=1 时调用此函数替换静态 users 列表。
@@ -739,19 +786,25 @@ def _get_oncall_mentioned_users(config_row: dict) -> list:
     schedule_id_str = config_row.get('flashcat_schedule_id') or Config.FLASHCAT_SCHEDULE_ID
 
     if not app_key:
-        logger.warning("oncall_sync 已启用但 FLASHCAT_APP_KEY 未配置，跳过 oncall 艾特")
+        logger.warning("oncall_sync 已启用但 FLASHCAT_APP_KEY 未配置，跳过 oncall 艾特: maid=%s", maid)
         return []
     if not schedule_id_str:
-        logger.warning("oncall_sync 已启用但未配置 flashcat_schedule_id 或 FLASHCAT_SCHEDULE_ID，跳过 oncall 艾特")
+        logger.warning(
+            "oncall_sync 已启用但未配置 schedule_id，跳过 oncall 艾特: maid=%s",
+            maid
+        )
         return []
 
     try:
         schedule_id = int(schedule_id_str)
     except (ValueError, TypeError):
-        logger.error("flashcat_schedule_id '%s' 不是有效整数，跳过 oncall 艾特", schedule_id_str)
+        logger.error(
+            "flashcat_schedule_id 不是有效整数，跳过 oncall 艾特: maid=%s schedule_id=%s",
+            maid, schedule_id_str
+        )
         return []
 
-    return get_oncall_open_ids(app_key, schedule_id)
+    return get_oncall_open_ids(app_key, schedule_id, maid=maid)
 
 
 def _create_phone_incident(data: dict, maid: str) -> str:
@@ -771,30 +824,39 @@ def _create_phone_incident(data: dict, maid: str) -> str:
     channel_id = Config.FLASHCAT_CHANNEL_ID
 
     if not app_key:
-        logger.error("FLASHCAT_APP_KEY 未配置，无法创建电话告警 incident")
-        return None
-    if not channel_id:
-        logger.error("FLASHCAT_CHANNEL_ID 未配置，无法创建电话告警 incident")
+        logger.error("Flashcat incident creation skipped because app key is missing: maid=%s", maid)
         return None
 
-    incident_id = create_phone_incident(data, app_key, channel_id)
+    incident_id = None
+    if channel_id:
+        incident_id = create_phone_incident(data, app_key, channel_id, maid=maid)
+    else:
+        logger.warning("Flashcat channel id missing, using Event API fallback: maid=%s", maid)
     if incident_id:
-        logger.info("📞 Flashcat incident 创建成功: incident_id=%s", incident_id)
+        logger.info("Flashcat incident created: maid=%s incident_id=%s", maid, incident_id)
         # 将 incident_id 入库，供后续认领按钮使用
         if maid:
             update_incident_id(maid, incident_id)
         return incident_id
     else:
-        logger.error("📞 Flashcat incident 创建失败，回退到旧接口")
-        # 回退到旧接口
         integration_key = Config.FLASHCAT_PHONE_INTEGRATION_KEY
+        logger.error("Flashcat incident/create failed, trying Event API fallback: maid=%s", maid)
+        incident_id = create_phone_incident_from_event(data, app_key, integration_key, maid)
+        if incident_id:
+            logger.info("Flashcat Event API created incident: maid=%s incident_id=%s", maid, incident_id)
+            if maid:
+                update_incident_id(maid, incident_id)
+            return incident_id
+
+        logger.error("📞 Flashcat Event API 未拿到 incident_id，回退到旧接口: maid=%s", maid)
+        # 回退到旧接口，至少保证电话通知仍然触发。
         if integration_key:
             def _do_send_fallback():
-                result = send_phone_alert(data, integration_key)
+                result = send_phone_alert(data, integration_key, maid=maid)
                 if result:
-                    logger.info("📞 电话告警（回退旧接口）已成功触发")
+                    logger.info("📞 电话告警（回退旧接口）已成功触发: maid=%s", maid)
                 else:
-                    logger.error("📞 电话告警（回退旧接口）触发失败")
+                    logger.error("📞 电话告警（回退旧接口）触发失败: maid=%s", maid)
             t = threading.Thread(target=_do_send_fallback, daemon=True)
             t.start()
         return None
@@ -825,7 +887,7 @@ def _build_ops_resolved_content(string_alert_info: str, alertname: str, mentione
     return _json.dumps(card, ensure_ascii=False)
 
 
-def _build_alert_message(alerts):
+def _build_alert_message(alerts, maid=None):
     """
     构建告警消息
     
@@ -847,12 +909,12 @@ def _build_alert_message(alerts):
     
     if not string_alert_info.strip():
         string_alert_info = "No alert information available."
-        logger.warning("No alert information available.")
+        logger.warning("No alert information available: maid=%s", maid)
     
     return string_alert_info
 
 
-def _determine_alert_severity(severities):
+def _determine_alert_severity(severities, maid=None):
     """
     确定告警级别（去重并取最高级别）
     
@@ -891,7 +953,7 @@ def _determine_alert_severity(severities):
     if severities:
         # 去重
         unique_severities = list(set(severities))
-        logger.info("告警级别列表（去重后）: %s", unique_severities)
+        logger.info("告警级别列表（去重后）: maid=%s severities=%s", maid, unique_severities)
         
         # 从severities中选择优先级最高的级别
         max_priority = 0
@@ -901,7 +963,10 @@ def _determine_alert_severity(severities):
             # 如果是数字，转换为对应的级别名称
             if sev_str.isdigit():
                 sev_lower = numeric_severity_map.get(sev_str, "warning")
-                logger.info("数字级别 %s 映射为 %s", sev_str, sev_lower)
+                logger.info(
+                    "数字告警级别映射: maid=%s source=%s target=%s",
+                    maid, sev_str, sev_lower
+                )
             else:
                 sev_lower = sev_str.lower()
             
@@ -910,6 +975,9 @@ def _determine_alert_severity(severities):
                 max_priority = priority
                 alert_severity = sev_lower
         
-        logger.info("最终告警级别: %s (优先级: %d)", alert_severity, max_priority)
+        logger.info(
+            "最终告警级别: maid=%s severity=%s priority=%d",
+            maid, alert_severity, max_priority
+        )
     
     return alert_severity
