@@ -75,13 +75,12 @@ def handle_error(error):
 
 # ── 注册 Blueprint ──
 from routes import (
-    alerts_bp, messages_bp, gitlab_bp,
+    alerts_bp, messages_bp,
     alert_rules_bp, feishu_users_bp, alert_stats_bp, system_bp,
 )
 
 app.register_blueprint(alerts_bp)
 app.register_blueprint(messages_bp)
-app.register_blueprint(gitlab_bp)
 app.register_blueprint(alert_rules_bp)
 app.register_blueprint(feishu_users_bp)
 app.register_blueprint(alert_stats_bp)

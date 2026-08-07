@@ -164,6 +164,7 @@ from alerts_format.flashcat_utils import (
     send_phone_alert,
     create_phone_incident,
     create_phone_incident_from_event,
+    probe_flashcat_api,
 )
 from alerts_format.alert_json_format import (
     extract_all_labels,
@@ -619,6 +620,25 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
     # 确定告警级别
     alert_severity = _determine_alert_severity(severities, maid=maid)
 
+    # Probe Flashcat before attempting any phone alert. A failed preflight
+    # becomes an explicit P0 fallback and skips all phone API calls.
+    phone_degradation_reason = None
+    if is_phone_alert and not is_resolved:
+        if not Config.FLASHCAT_APP_KEY:
+            phone_degradation_reason = "Flashcat APP_KEY is not configured; \u7535\u8bdd\u544a\u8b66\u5df2\u964d\u7ea7\u4e3a P0"
+        else:
+            flashcat_available, probe_reason = probe_flashcat_api(maid=maid)
+            if not flashcat_available:
+                phone_degradation_reason = (
+                    f"\u7535\u8bdd\u544a\u8b66\u56e0\u4e3a {probe_reason}\uff0c\u5df2\u964d\u7ea7\u4e3a P0"
+                )
+        if phone_degradation_reason:
+            alert_severity = "p0"
+            logger.error(
+                "Phone alert downgraded to P0: maid=%s reason=%s",
+                maid, phone_degradation_reason
+            )
+
     # 判断模板类型（默认 ops）
     template_type = config_row.get('template_type', 'ops')
     group_id = config_row['group_id']
@@ -626,7 +646,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
     # phone 级别仅 firing 时触发电话，resolved 不打电话
     # 创建 Flashcat incident 以触发电话通知，返回 incident_id 用于卡片认领按钮
     incident_id = None
-    if is_phone_alert and not is_resolved:
+    if is_phone_alert and not is_resolved and not phone_degradation_reason:
         logger.info("trigger phone alert and create Flashcat incident: maid=%s", maid)
         incident_id = _create_phone_incident(data, maid)
 
@@ -720,7 +740,8 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         raw_alerts = extract_alert_raw(data)
         common_labels = data.get('commonLabels', {})
         content = build_biz_firing_card(
-            alertname, alert_severity, raw_alerts, grafana_urls, maid, common_labels, mentioned_user_list, incident_id
+            alertname, alert_severity, raw_alerts, grafana_urls, maid, common_labels, mentioned_user_list, incident_id,
+            severity_note=phone_degradation_reason,
         )
         if not content:
             logger.info("biz firing 卡片无 firing 实例，跳过发送: maid=%s group_id=%s", maid, group_id)
@@ -742,6 +763,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             severity=alert_severity,
             maid=maid,
             incident_id=incident_id,
+            severity_note=phone_degradation_reason,
         )
         # ops 模板卡片在 alert_to_feishu 内部构建，无 content 变量
         content = None

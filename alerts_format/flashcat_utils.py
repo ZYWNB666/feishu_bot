@@ -13,11 +13,33 @@ import time
 import logging
 import requests
 
-from config.constants import FLASHCAT_API_TIMEOUT, MAX_RETRIES, RETRY_BACKOFF_BASE
+from config.constants import (
+    FLASHCAT_API_TIMEOUT,
+    FLASHCAT_PROBE_TIMEOUT,
+    MAX_RETRIES,
+    RETRY_BACKOFF_BASE,
+)
 
 logger = logging.getLogger(__name__)
 
 FLASHCAT_API_BASE = "https://api.flashcat.cloud"
+
+def probe_flashcat_api(maid: str = None) -> tuple[bool, str]:
+    """Probe Flashcat reachability before attempting a phone alert."""
+    try:
+        response = requests.get(FLASHCAT_API_BASE, timeout=FLASHCAT_PROBE_TIMEOUT)
+        if response.status_code >= 500:
+            reason = f"Flashcat API \u6682\u65f6\u4e0d\u53ef\u7528\uff08HTTP {response.status_code}\uff09"
+            logger.error("Flashcat API preflight failed: maid=%s status=%s", maid, response.status_code)
+            return False, reason
+        logger.info("Flashcat API preflight passed: maid=%s status=%s", maid, response.status_code)
+        return True, ""
+    except requests.RequestException as e:
+        logger.error("Flashcat API preflight failed: maid=%s error=%s", maid, e)
+        return False, "Flashcat API \u7f51\u7edc\u4e0d\u53ef\u8fbe\uff08DNS/\u8fde\u63a5\u5931\u8d25\uff09"
+    except Exception as e:
+        logger.error("Flashcat API \u7f51\u7edc\u9884\u68c0\u5f02\u5e38: maid=%s error=%s", maid, e, exc_info=True)
+        return False, "Flashcat API \u7f51\u7edc\u9884\u68c0\u5f02\u5e38"
 
 
 def _extract_alert_title_and_description(data: dict) -> tuple[str, str]:

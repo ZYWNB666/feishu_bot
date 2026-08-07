@@ -9,7 +9,6 @@
 5. [标签路由匹配逻辑](#标签路由匹配逻辑)
 6. [飞书事件处理](#飞书事件处理)
 7. [卡片交互与静默](#卡片交互与静默)
-8. [GitLab 消息处理](#gitlab-消息处理)
 9. [数据库设计](#数据库设计)
 10. [配置与环境变量](#配置与环境变量)
 
@@ -63,7 +62,6 @@ python main.py
 | `POST` | `/webhook/event` | 接收飞书 Webhook 事件（进群等），立即返回 200，异步处理 |
 | `POST` | `/api/card_callback` | 接收飞书卡片按钮点击回调 |
 | `POST` | `/api/v1/alerts` | **接收 Alertmanager 告警**（核心入口） |
-| `POST` | `/api/gitlab-pipeline-status` | 接收 GitLab Pipeline/Push Webhook |
 | `POST` | `/api/send_message` | 主动发送卡片消息（调试/外部触发） |
 | `POST` | `/api/send_text` | 主动发送文本消息 |
 | `GET/POST/PUT/DELETE` | `/api/alert_rules` | 告警路由规则 CRUD（管理后台） |
@@ -204,20 +202,6 @@ for rule_key, rule_value in label_rules.items():
   "maid": "ABCD1234XYZ",
   "duration": 7200
 }
-```
-
----
-
-## GitLab 消息处理
-
-`POST /api/gitlab-pipeline-status` → `pipeline_msg_format.json_processing()`
-
-```
-事件类型：
-  Pipeline Hook → 格式化为 Pipeline 状态卡片（含 branch/status/duration）
-  Push Hook     → 格式化为 Push 事件卡片（含 commits 列表）
-
-发送目标：从请求参数或 Header 中取 group_id，调用 feishu_client.send()
 ```
 
 ---

@@ -290,6 +290,69 @@ class AlertLifecycleTests(unittest.TestCase):
         self.assertEqual(result["summary"]["failed"], 1)
 
 
+class PhoneAlertFallbackTests(unittest.TestCase):
+    def test_flashcat_probe_failure_downgrades_phone_to_p0(self):
+        import json
+
+        from feishu_utils import alert_handler
+
+        data = {
+            "status": "firing",
+            "alerts": [
+                {
+                    "status": "firing",
+                    "fingerprint": "phone-fallback-fp",
+                    "labels": {
+                        "alertname": "Upstream5xx",
+                        "severity": "phone",
+                    },
+                    "annotations": {"summary": "upstream failure"},
+                }
+            ],
+        }
+        config_row = {
+            "alert_id": "alert-phone-fallback",
+            "group_id": "chat-phone-fallback",
+            "project": "test-project",
+            "template_type": "biz",
+        }
+
+        class FakeFeishuClient:
+            def __init__(self):
+                self.contents = []
+
+            def send(self, *args):
+                self.contents.append(args[-1])
+                return "message-phone-fallback"
+
+        feishu_client = FakeFeishuClient()
+        with (
+            patch.object(
+                alert_handler,
+                "alert_data_api",
+                return_value=(["alert text"], ["phone"], "maid-phone-fallback", {}),
+            ),
+            patch.object(
+                alert_handler,
+                "probe_flashcat_api",
+                return_value=(False, "Flashcat API \u7f51\u7edc\u4e0d\u53ef\u8fbe\uff08DNS/\u8fde\u63a5\u5931\u8d25\uff09"),
+            ),
+            patch.object(alert_handler.Config, "FLASHCAT_APP_KEY", "test-app-key"),
+            patch.object(alert_handler, "_create_phone_incident") as create_incident,
+            patch.object(alert_handler, "update_message_id"),
+        ):
+            result = alert_handler._process_single_alert_config(
+                data, config_row, "Upstream5xx", feishu_client
+            )
+
+        self.assertTrue(result["success"])
+        create_incident.assert_not_called()
+        card = json.loads(feishu_client.contents[0])
+        self.assertIn("[P0]", card["header"]["title"]["content"])
+        card_text = json.dumps(card, ensure_ascii=False)
+        self.assertIn("\u544a\u8b66\u964d\u7ea7", card_text)
+        self.assertIn("\u7f51\u7edc\u4e0d\u53ef\u8fbe", card_text)
+
 class RouteTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -40,6 +40,9 @@ FEISHU_API_TIMEOUT = int(os.getenv("FEISHU_API_TIMEOUT", "10"))
 # Flashcat API 请求超时（秒）
 FLASHCAT_API_TIMEOUT = int(os.getenv("FLASHCAT_API_TIMEOUT", "10"))
 
+# Flashcat phone alert preflight timeout in seconds.
+FLASHCAT_PROBE_TIMEOUT = int(os.getenv("FLASHCAT_PROBE_TIMEOUT", "3"))
+
 # Alertmanager / Grafana 静默 API 请求超时（秒）
 SILENCE_API_TIMEOUT = int(os.getenv("SILENCE_API_TIMEOUT", "30"))
 

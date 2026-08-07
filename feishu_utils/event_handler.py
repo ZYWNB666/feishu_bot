@@ -23,7 +23,6 @@ from config.constants import (
     SILENCE_DURATION_24H,
     SILENCE_DURATION_3D,
 )
-from jira_utils.jira_all_class import JiraClient
 from utils.bounded_cache import BoundedTTLCache
 from utils.regex_cache import compile_pattern, search as regex_search, match as regex_match
 from .bot_msg_format import bot_add_msg_to_group, user_add_msg_to_group
@@ -267,151 +266,6 @@ def handle_message_received(feishu_client, event_data):
             feishu_client.reply_message(message_id, "interactive", reply_content)
             logger.info("已回复groupid命令给用户 %s", sender_id)
 
-        elif command == "/jira":
-            # 处理 Jira 邀请命令
-            # 格式: /jira email@example.com
-            if len(parts) < 2:
-                error_card = {
-                    "config": {"wide_screen_mode": True},
-                    "header": {
-                        "title": {"tag": "plain_text", "content": "⚠️ 参数错误"},
-                        "template": "yellow"
-                    },
-                    "elements": [{
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": "**用法：** /jira 邮箱地址\n**示例：** /jira user@example.com"
-                        }
-                    }]
-                }
-                reply_content = json.dumps(error_card)
-                feishu_client.reply_message(message_id, "interactive", reply_content)
-                return True
-            
-            # 提取邮箱地址（处理飞书自动转换的 markdown 链接格式）
-            # 飞书会把 test@osip.cc 转成 [test@osip.cc](mailto:test@osip.cc)
-            email_input = parts[1].strip()
-            
-            # 尝试从 markdown 链接格式中提取邮箱（正则编译结果缓存）
-            mailto_match = regex_search(r'\[([^\]]+)\]\(mailto:([^\)]+)\)', email_input)
-            if mailto_match:
-                # 使用 mailto: 后面的邮箱地址
-                email = mailto_match.group(2).strip()
-            else:
-                # 直接使用输入的内容
-                email = email_input
-            
-            # 验证邮箱格式（正则编译结果缓存）
-            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-            if not regex_match(email_pattern, email):
-                error_card = {
-                    "config": {"wide_screen_mode": True},
-                    "header": {
-                        "title": {"tag": "plain_text", "content": "⚠️ 邮箱格式错误"},
-                        "template": "yellow"
-                    },
-                    "elements": [{
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"**输入的邮箱：** {email}\n**提示：** 请输入有效的邮箱地址"
-                        }
-                    }]
-                }
-                reply_content = json.dumps(error_card)
-                feishu_client.reply_message(message_id, "interactive", reply_content)
-                return True
-            
-            # 验证邮箱后缀
-            allowed_suffixes = Config.JIRA_ALLOWED_EMAIL_SUFFIXES
-            if allowed_suffixes:
-                # 解析允许的后缀列表
-                suffix_list = [s.strip().lower() for s in allowed_suffixes.split(",") if s.strip()]
-                email_lower = email.lower()
-                suffix_valid = any(email_lower.endswith(suffix) for suffix in suffix_list)
-                
-                if not suffix_valid:
-                    error_card = {
-                        "config": {"wide_screen_mode": True},
-                        "header": {
-                            "title": {"tag": "plain_text", "content": "⚠️ 邮箱后缀不允许"},
-                            "template": "yellow"
-                        },
-                        "elements": [{
-                            "tag": "div",
-                            "text": {
-                                "tag": "lark_md",
-                                "content": f"**输入的邮箱：** {email}\n**允许的后缀：** {', '.join(suffix_list)}\n**提示：** 请使用允许的邮箱后缀"
-                            }
-                        }]
-                    }
-                    reply_content = json.dumps(error_card)
-                    feishu_client.reply_message(message_id, "interactive", reply_content)
-                    return True
-            
-            # 调用 Jira 邀请接口
-            try:
-                jira_client = JiraClient(Config.JIRA_URL)
-                jira_client.login(Config.JIRA_USERNAME, Config.JIRA_PASSWORD)
-                
-                result = jira_client.invite_user(email)
-                
-                if result["success"]:
-                    success_card = {
-                        "config": {"wide_screen_mode": True},
-                        "header": {
-                            "title": {"tag": "plain_text", "content": "✅ Jira 邀请成功"},
-                            "template": "green"
-                        },
-                        "elements": [{
-                            "tag": "div",
-                            "text": {
-                                "tag": "lark_md",
-                                "content": f"**邮箱：** {email}\n**状态：** 邀请邮件已发送\n\n请查收邮件并完成注册"
-                            }
-                        }]
-                    }
-                    reply_content = json.dumps(success_card)
-                else:
-                    error_card = {
-                        "config": {"wide_screen_mode": True},
-                        "header": {
-                            "title": {"tag": "plain_text", "content": "❌ Jira 邀请失败"},
-                            "template": "red"
-                        },
-                        "elements": [{
-                            "tag": "div",
-                            "text": {
-                                "tag": "lark_md",
-                                "content": f"**邮箱：** {email}\n**错误：** {result['message']}"
-                            }
-                        }]
-                    }
-                    reply_content = json.dumps(error_card)
-                
-                feishu_client.reply_message(message_id, "interactive", reply_content)
-                logger.info("已处理 /jira 命令，邮箱: %s, 结果: %s", email, result['success'])
-                
-            except Exception as e:
-                logger.error("处理 /jira 命令失败: %s", e, exc_info=True)
-                error_card = {
-                    "config": {"wide_screen_mode": True},
-                    "header": {
-                        "title": {"tag": "plain_text", "content": "❌ 系统错误"},
-                        "template": "red"
-                    },
-                    "elements": [{
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"**错误：** 无法连接到 Jira 服务\n**详情：** {str(e)}"
-                        }
-                    }]
-                }
-                reply_content = json.dumps(error_card)
-                feishu_client.reply_message(message_id, "interactive", reply_content)
-            
         elif command == "help":
             card_data = {
                 "config": {
@@ -429,7 +283,7 @@ def handle_message_received(feishu_client, event_data):
                         "tag": "div",
                         "text": {
                             "tag": "lark_md",
-                            "content": "**help** - 显示此帮助信息\n**myuid** - 查看你的用户ID\n**groupid** - 查看当前群组ID\n**/jira 邮箱** - 发送 Jira 邀请邮件\n　　示例：/jira user@example.com"
+                            "content": "**help** - 显示此帮助信息\n**myuid** - 查看你的用户ID\n**groupid** - 查看当前群组ID"
                         }
                     }
                 ]
@@ -448,7 +302,7 @@ def handle_message_received(feishu_client, event_data):
         return False
 
 
-def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, alertname="告警通知", severity="warning", maid=None, incident_id=None):
+def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, alertname="告警通知", severity="warning", maid=None, incident_id=None, severity_note=None):
     """
     处理告警信息发送到飞书（卡片格式）
     
@@ -514,6 +368,16 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
             })
         
         # 添加告警详细信息
+        if severity_note:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"\u26a0\ufe0f **\u544a\u8b66\u964d\u7ea7**\n{severity_note}",
+                },
+            })
+            elements.append({"tag": "hr"})
+
         elements.append({
             "tag": "div",
             "text": {

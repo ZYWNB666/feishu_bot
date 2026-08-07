@@ -22,13 +22,6 @@
   - 接收并处理用户消息
   - 支持命令交互（help、myuid、groupid 等）
 
-- 🔄 **GitLab Pipeline 集成**
-  - 接收 GitLab Pipeline webhook
-  - 实时推送 Pipeline 状态到飞书群聊
-  - 成功时显示所有步骤状态
-  - 失败时显示具体失败的步骤（stage + job）
-  - 支持美化的卡片消息展示
-
 - 🎛️ **Web管理界面**
   - 可视化告警规则管理
   - 规则增删改查
@@ -214,49 +207,6 @@ POST http://localhost:3000/api/card_callback
 
 用于处理卡片交互（如静默按钮点击），需在飞书开发者后台配置。
 
-### 9. GitLab Pipeline Webhook
-
-```bash
-POST http://localhost:3000/api/gitlab-pipeline-status
-Content-Type: application/json
-X-Gitlab-Token: oc_xxxxxxxxxxxxxxxx  # 群聊ID
-
-{
-  "object_kind": "pipeline",
-  "object_attributes": {
-    "id": 12345,
-    "status": "failed",
-    "stages": ["build", "test", "deploy"],
-    "created_at": "2024-01-01 10:00:00",
-    "finished_at": "2024-01-01 10:05:00"
-  },
-  "commit": {
-    "id": "abc123",
-    "message": "Update feature",
-    "url": "https://gitlab.com/project/commit/abc123",
-    "author": {
-      "name": "John Doe",
-      "email": "john@example.com"
-    }
-  },
-  "project": {
-    "name": "my-project",
-    "web_url": "https://gitlab.com/my-project"
-  },
-  "builds": [
-    {
-      "id": 1,
-      "stage": "test",
-      "name": "unit-test",
-      "status": "failed",
-      "allow_failure": false
-    }
-  ]
-}
-```
-
-用于接收 GitLab Pipeline 状态通知，需在 GitLab 项目中配置 Pipeline events webhook。
-
 ## 💡 使用示例
 
 ### Python调用示例
@@ -286,26 +236,6 @@ receivers:
       - url: 'http://your-domain:3000/api/v1/alerts'
         send_resolved: true
 ```
-
-### GitLab Pipeline 集成
-
-在 GitLab 项目中配置 Webhook：
-
-1. 进入项目 **Settings → Webhooks**
-2. 填写配置：
-   - **URL**: `http://your-domain:3000/api/gitlab-pipeline-status`
-   - **Secret Token**: 填入飞书群聊ID（如 `oc_xxxxxxxxxxxxxxxx`）
-   - **Trigger**: 勾选 `Pipeline events`
-   - **Enable SSL verification**: 根据实际情况选择
-3. 点击 **Add webhook** 保存
-
-配置完成后，Pipeline 执行结果会自动推送到对应的飞书群聊。
-
-**消息效果：**
-- ✅ **成功**: 显示项目名称、提交信息、所有步骤状态
-- ❌ **失败**: 显示项目名称、提交信息、**具体失败的步骤**（stage + job 名称）
-
-![gitlab-pipeline消息推送](./img/pipeline_webhook.png)
 
 ### 机器人命令
 
@@ -372,9 +302,7 @@ feishu_bot/
 │   ├── alert_handler.py       # 告警处理器
 │   ├── callback_handler.py    # 回调处理器
 │   └── bot_msg_format.py      # 消息格式化
-├── gitlab_utils/               # GitLab 集成模块
 │   ├── __init__.py            # 模块初始化
-│   └── pipeline_msg_format.py # Pipeline 消息格式化
 ├── alerts_format/              # 告警格式化模块
 │   ├── alert_json_format.py   # 告警JSON处理
 │   ├── db_utils.py            # 数据库工具
@@ -431,15 +359,10 @@ LOG_LEVEL=DEBUG  # DEBUG, INFO, WARNING, ERROR
 ## ⚠️ 注意事项
 
 1. **权限配置**：确保机器人已加入目标群聊，并配置了必要的权限
-2. **网络访问**：飞书服务器和 GitLab 服务器需要能访问你的回调地址（公网或内网穿透）
+2. **网络访问**：飞书服务器和 外部依赖服务需要能访问你的回调地址（公网或内网穿透）
 3. **HTTPS**：生产环境建议使用 HTTPS
 4. **数据库**：确保 MySQL 数据库已启动并可访问
 5. **环境变量**：不要将 `.env` 文件提交到版本控制系统
-6. **GitLab Webhook**：
-   - 在配置 GitLab Webhook 时，Secret Token 填写的是飞书群聊ID（`oc_xxx`格式）
-   - 仅支持 Pipeline events 类型的 webhook
-   - 只推送 success 和 failed 状态的 Pipeline，其他状态会被忽略
-
 ## 📚 更多文档
 
 - [告警静默功能说明](./SILENCE_FEATURE.md) - 详细的静默功能实现文档
@@ -457,5 +380,4 @@ MIT
 
 - [飞书开放平台](https://open.feishu.cn/)
 - [Alertmanager 文档](https://prometheus.io/docs/alerting/latest/alertmanager/)
-- [GitLab Webhooks 文档](https://docs.gitlab.com/ee/user/project/integrations/webhooks.html)
 - [Flask 文档](https://flask.palletsprojects.com/)

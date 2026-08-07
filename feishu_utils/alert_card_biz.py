@@ -159,6 +159,7 @@ def build_biz_firing_card(
     common_labels: dict,
     mentioned_user_list: list,
     incident_id: str = None,
+    severity_note: str = None,
 ) -> str:
     """
     构建业务告警（firing）飞书卡片 JSON 字符串
@@ -196,6 +197,16 @@ def build_biz_firing_card(
     # 公共标签（过滤 alertname / grafana_folder / severity / alertid / model_name）
     # model_name 已通过 extract_alert_raw 保留到每个实例的特有标签中，
     # 此处排除避免在公共区域重复显示
+    if severity_note:
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"\u26a0\ufe0f **\u544a\u8b66\u964d\u7ea7**\n{severity_note}",
+            },
+        })
+        elements.append({"tag": "hr"})
+
     _label_blacklist = {'alertname', 'grafana_folder', 'severity', 'alertid', 'model_name'}
     common_display = {k: v for k, v in (common_labels or {}).items() if k not in _label_blacklist}
     if common_display:
