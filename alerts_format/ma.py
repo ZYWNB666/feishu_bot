@@ -7,6 +7,7 @@ from mysql.connector import Error
 
 from config import config
 from config.constants import SILENCE_API_TIMEOUT
+from alerts_format.silence_extension import extend_existing_silences
 from db.pool import db_cursor
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,40 @@ def macreate(maid, matime):
         alertlabels_dict = json.loads(alertlabels_data) if isinstance(alertlabels_data, str) else alertlabels_data
         matchers_list = alertlabels_dict.get('matchers', [])
         logger.info("Alertmanager silence create batch: maid=%s total=%d", maid, len(matchers_list))
+        existing_silence_ids = []
+        if silenceid_json:
+            try:
+                parsed_silence_ids = (
+                    json.loads(silenceid_json)
+                    if isinstance(silenceid_json, str)
+                    else silenceid_json
+                )
+                if isinstance(parsed_silence_ids, list):
+                    existing_silence_ids = [str(sid) for sid in parsed_silence_ids if sid]
+            except (TypeError, json.JSONDecodeError):
+                logger.warning("Invalid stored silence IDs, creating a fresh silence: maid=%s", maid)
+
+        if existing_silence_ids:
+            extension_result = extend_existing_silences(
+                f"{alertma_config.rstrip('/')}/api/v2/silence",
+                existing_silence_ids,
+                matime_hours,
+                backend="Alertmanager",
+            )
+            if extension_result and extension_result.get("success"):
+                updated_silence_ids = extension_result.get("silence_ids", existing_silence_ids)
+                with db_cursor() as (conn, cursor):
+                    cursor.execute(
+                        "UPDATE alert_data SET silenceid = %s WHERE id = %s",
+                        (json.dumps(updated_silence_ids), maid),
+                    )
+                    conn.commit()
+                extension_result["message"] = (
+                    f"成功延长 {len(existing_silence_ids)} 个 Alertmanager 静默规则"
+                )
+                return extension_result
+            if extension_result and not extension_result.get("not_found"):
+                return extension_result
 
         now = datetime.now().astimezone()
         startsAttime = now.isoformat()

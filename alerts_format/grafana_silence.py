@@ -15,6 +15,7 @@ import requests
 
 from config.config import Config
 from config.constants import SILENCE_API_TIMEOUT
+from alerts_format.silence_extension import extend_existing_silences
 from db.pool import db_cursor
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,38 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
 
     if not matchers_list:
         return {"success": False, "message": "该告警无 matchers 数据"}
+
+    existing_silence_ids = []
+    silenceid_raw = row.get("silenceid")
+    if silenceid_raw:
+        try:
+            parsed_silence_ids = (
+                json.loads(silenceid_raw)
+                if isinstance(silenceid_raw, str)
+                else silenceid_raw
+            )
+            if isinstance(parsed_silence_ids, list):
+                existing_silence_ids = [str(sid) for sid in parsed_silence_ids if sid]
+        except (TypeError, json.JSONDecodeError):
+            logger.warning("Invalid stored silence IDs, creating a fresh silence: maid=%s", maid)
+
+    if existing_silence_ids:
+        extension_result = extend_existing_silences(
+            f"{grafana_url.rstrip('/')}/api/alertmanager/grafana/api/v2/silence",
+            existing_silence_ids,
+            duration_hours,
+            headers={"Authorization": f"Bearer {api_key}"},
+            backend="Grafana",
+        )
+        if extension_result and extension_result.get("success"):
+            updated_silence_ids = extension_result.get("silence_ids", existing_silence_ids)
+            _save_silence_ids(maid, updated_silence_ids)
+            extension_result["message"] = (
+                f"成功延长 {len(existing_silence_ids)} 个 Grafana 静默规则"
+            )
+            return extension_result
+        if extension_result and not extension_result.get("not_found"):
+            return extension_result
 
     now = datetime.now().astimezone()
     starts_at = now.isoformat(timespec='milliseconds')

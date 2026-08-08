@@ -24,6 +24,11 @@ from config.constants import (
     MAX_RETRIES,
     RETRY_BACKOFF_BASE,
     DEFAULT_SILENCE_DURATION,
+    SILENCE_DURATION_6H,
+    SILENCE_DURATION_12H,
+    SILENCE_DURATION_24H,
+    SILENCE_DURATION_3D,
+    SILENCE_DURATION_7D,
 )
 from db.pool import db_cursor
 from utils.bounded_cache import BoundedTTLCache
@@ -33,7 +38,8 @@ logger = logging.getLogger(__name__)
 # 用于去重的缓存（存储最近处理过的回调）
 # 使用带容量上限的 TTL 缓存，防止长时间运行后内存无限增长
 _callback_cache = BoundedTTLCache(maxsize=CALLBACK_CACHE_MAXSIZE, ttl=CALLBACK_CACHE_TTL)
-_callback_cache_lock = threading.Lock()  # 保留用于跨缓存原子操作
+_callback_cache_lock = threading.Lock()
+_silence_action_lock = threading.Lock()  # 保留用于跨缓存原子操作
 
 
 def _get_current_time():
@@ -68,6 +74,32 @@ def _get_silence_config_by_maid(maid: str) -> dict:
         return {}
 
 
+def _format_silence_duration(duration_seconds):
+    """将累计静默秒数格式化为易读的天/小时，避免网络耗时导致少显示1小时。"""
+    seconds = max(0, int(duration_seconds or 0))
+    total_hours = max(1, (seconds + 3599) // 3600)
+    days, hours = divmod(total_hours, 24)
+    parts = []
+    if days:
+        parts.append(f"{days} 天")
+    if hours:
+        parts.append(f"{hours} 小时")
+    return " ".join(parts) or "1 小时"
+
+
+def _silence_extension_button(maid, text, duration):
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": text},
+        "type": "primary",
+        "value": {
+            "action": "silence",
+            "maid": maid,
+            "duration": duration,
+        },
+    }
+
+
 def create_silence_success_card(maid, duration, operator_id=None):
     """
     创建静默成功的卡片
@@ -79,13 +111,7 @@ def create_silence_success_card(maid, duration, operator_id=None):
     Returns:
         dict: 飞书卡片数据
     """
-    # 智能显示时间单位
-    duration_hours = duration // 3600
-    if duration_hours >= 24:
-        duration_days = duration_hours // 24
-        duration_text = f"{duration_days} 天"
-    else:
-        duration_text = f"{duration_hours} 小时"
+    duration_text = _format_silence_duration(duration)
     
     card_data = {
         "config": {
@@ -110,21 +136,38 @@ def create_silence_success_card(maid, duration, operator_id=None):
                 "tag": "hr"
             },
             {
-                "tag": "note",
-                "elements": [
-                    {
-                        "tag": "plain_text",
-                        "content": f"⏰ 操作时间: {_get_current_time()}"
-                    },
-                    {
-                        "tag": "lark_md",
-                        "content": f"👤 操作人: <at id=\"{operator_id}\"></at>" if operator_id else ""
-                    }
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        "**继续延长静默**\n"
+                        "下方时长会在当前静默结束时间基础上继续累加。"
+                    )
+                }
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    _silence_extension_button(
+                        maid, "🔕 静默6小时", SILENCE_DURATION_6H
+                    ),
+                    _silence_extension_button(
+                        maid, "🔕 静默12小时", SILENCE_DURATION_12H
+                    ),
+                    _silence_extension_button(
+                        maid, "🔕 静默24小时", SILENCE_DURATION_24H
+                    ),
                 ]
             },
             {
                 "tag": "action",
                 "actions": [
+                    _silence_extension_button(
+                        maid, "🔕 静默3天", SILENCE_DURATION_3D
+                    ),
+                    _silence_extension_button(
+                        maid, "🔕 静默7天", SILENCE_DURATION_7D
+                    ),
                     {
                         "tag": "button",
                         "text": {
@@ -136,6 +179,29 @@ def create_silence_success_card(maid, duration, operator_id=None):
                             "action": "cancel_silence",
                             "maid": maid
                         }
+                    }
+                ]
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        "⚠️ **操作提示：静默操作请根据实际业务场景谨慎选择。**\n"
+                        "长时间静默可能掩盖持续故障，请确认影响范围和处置计划。"
+                    )
+                }
+            },
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": f"⏰ 操作时间: {_get_current_time()}"
+                    },
+                    {
+                        "tag": "lark_md",
+                        "content": f"👤 操作人: <at id=\"{operator_id}\"></at>" if operator_id else ""
                     }
                 ]
             }
@@ -269,14 +335,18 @@ def handle_silence_action(maid, duration, open_message_id, feishu_client, operat
             silence_cfg = _get_silence_config_by_maid(maid)
             silence_type = silence_cfg.get('silence_type', 'grafana')
 
-            if silence_type == 'grafana':
-                grafana_url = silence_cfg.get('grafana_url', '')
-                silence_result = grafana_create_silence(maid, duration_hours, grafana_url)
-            else:
-                silence_result = macreate(maid, duration_hours)
+            with _silence_action_lock:
+                if silence_type == 'grafana':
+                    grafana_url = silence_cfg.get('grafana_url', '')
+                    silence_result = grafana_create_silence(maid, duration_hours, grafana_url)
+                else:
+                    silence_result = macreate(maid, duration_hours)
 
             if silence_result.get('success'):
-                silence_card = create_silence_success_card(maid, duration, operator_id)
+                display_duration = silence_result.get("duration_seconds", duration)
+                silence_card = create_silence_success_card(
+                    maid, display_duration, operator_id
+                )
                 feishu_client.reply_message(
                     open_message_id,
                     "interactive",
@@ -698,7 +768,7 @@ def process_card_callback(data, feishu_client):
         maid = action_value.get("maid")
         
         # 去重检查
-        if is_duplicate_callback(action_type, action_value, open_message_id):
+        if action_type != "silence" and is_duplicate_callback(action_type, action_value, open_message_id):
             return {}
         
         # 处理静默操作

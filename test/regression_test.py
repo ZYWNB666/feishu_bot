@@ -2,6 +2,7 @@
 """重构关键路径回归测试，不访问任何外部服务。"""
 
 import os
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -352,6 +353,216 @@ class PhoneAlertFallbackTests(unittest.TestCase):
         card_text = json.dumps(card, ensure_ascii=False)
         self.assertIn("\u544a\u8b66\u964d\u7ea7", card_text)
         self.assertIn("\u7f51\u7edc\u4e0d\u53ef\u8fbe", card_text)
+
+class SilenceExtensionTests(unittest.TestCase):
+    def test_silence_success_card_has_all_extension_options_and_warning(self):
+        from feishu_utils.callback_handler import create_silence_success_card
+
+        maid = "maid-card-options"
+        card = create_silence_success_card(
+            maid,
+            30 * 3600,
+            "operator-1",
+        )
+
+        card_text = json.dumps(card, ensure_ascii=False)
+        self.assertIn("已静默 1 天 6 小时", card_text)
+        self.assertIn("当前静默结束时间基础上继续累加", card_text)
+        self.assertIn("请根据实际业务场景谨慎选择", card_text)
+        self.assertIn("长时间静默可能掩盖持续故障", card_text)
+
+        action_rows = [
+            element
+            for element in card["elements"]
+            if element.get("tag") == "action"
+        ]
+        self.assertTrue(all(len(row["actions"]) <= 5 for row in action_rows))
+
+        buttons = [
+            button
+            for row in action_rows
+            for button in row["actions"]
+        ]
+        silence_buttons = {
+            button["text"]["content"]: button["value"]
+            for button in buttons
+            if button["value"]["action"] == "silence"
+        }
+        self.assertEqual(
+            silence_buttons,
+            {
+                "🔕 静默6小时": {
+                    "action": "silence",
+                    "maid": maid,
+                    "duration": 6 * 3600,
+                },
+                "🔕 静默12小时": {
+                    "action": "silence",
+                    "maid": maid,
+                    "duration": 12 * 3600,
+                },
+                "🔕 静默24小时": {
+                    "action": "silence",
+                    "maid": maid,
+                    "duration": 24 * 3600,
+                },
+                "🔕 静默3天": {
+                    "action": "silence",
+                    "maid": maid,
+                    "duration": 3 * 24 * 3600,
+                },
+                "🔕 静默7天": {
+                    "action": "silence",
+                    "maid": maid,
+                    "duration": 7 * 24 * 3600,
+                },
+            },
+        )
+        self.assertTrue(
+            any(button["value"]["action"] == "cancel_silence" for button in buttons)
+        )
+
+    def test_existing_silence_is_extended_from_current_end(self):
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import Mock, patch
+
+        from alerts_format.silence_extension import extend_existing_silences
+
+        current_end = datetime.now(timezone.utc) + timedelta(hours=2)
+        get_response = Mock(status_code=200)
+        get_response.json.return_value = {
+            "id": "silence-1",
+            "matchers": [{"name": "alertname", "value": "Test", "isEqual": True}],
+            "startsAt": datetime.now(timezone.utc).isoformat(),
+            "endsAt": current_end.isoformat(),
+            "createdBy": "feishu_bot",
+            "comment": "test",
+            "status": {"state": "active"},
+        }
+        post_response = Mock(status_code=200)
+        post_response.json.return_value = {"silenceID": "silence-1"}
+
+        with (
+            patch("alerts_format.silence_extension.requests.get", return_value=get_response),
+            patch("alerts_format.silence_extension.requests.post", return_value=post_response) as post,
+        ):
+            result = extend_existing_silences(
+                "https://alertmanager.test/api/v2/silence",
+                ["silence-1"],
+                2,
+                backend="Alertmanager",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["silence_ids"], ["silence-1"])
+        self.assertEqual(
+            post.call_args.args[0],
+            "https://alertmanager.test/api/v2/silences",
+        )
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["id"], "silence-1")
+        updated_end = datetime.fromisoformat(payload["endsAt"])
+        self.assertGreater(
+            updated_end,
+            current_end + timedelta(hours=1, minutes=59),
+        )
+        self.assertNotIn("status", payload)
+
+    def test_three_grafana_clicks_keep_one_id_and_add_six_hours(self):
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import Mock, patch
+
+        from alerts_format.silence_extension import extend_existing_silences
+
+        now = datetime.now(timezone.utc)
+        silence_id = "grafana-silence-1"
+
+        def get_response(ends_at):
+            response = Mock(status_code=200)
+            response.json.return_value = {
+                "id": silence_id,
+                "matchers": [
+                    {
+                        "name": "alertname",
+                        "value": "Test",
+                        "isEqual": True,
+                        "isRegex": False,
+                    }
+                ],
+                "startsAt": now.isoformat(),
+                "endsAt": ends_at.isoformat(),
+                "createdBy": "feishu_bot",
+                "comment": "test",
+            }
+            return response
+
+        post_response = Mock(status_code=200)
+        post_response.json.return_value = {"silenceID": silence_id}
+
+        with (
+            patch(
+                "alerts_format.silence_extension.requests.get",
+                side_effect=[
+                    get_response(now + timedelta(hours=2)),
+                    get_response(now + timedelta(hours=4)),
+                ],
+            ),
+            patch("alerts_format.silence_extension.requests.post", return_value=post_response) as post,
+        ):
+            second_click = extend_existing_silences(
+                "https://grafana.test/api/alertmanager/grafana/api/v2/silence",
+                [silence_id],
+                2,
+                headers={"Authorization": "Bearer test"},
+                backend="Grafana",
+            )
+            third_click = extend_existing_silences(
+                "https://grafana.test/api/alertmanager/grafana/api/v2/silence",
+                [silence_id],
+                2,
+                headers={"Authorization": "Bearer test"},
+                backend="Grafana",
+            )
+
+        self.assertTrue(second_click["success"])
+        self.assertTrue(third_click["success"])
+        self.assertEqual(second_click["silence_ids"], [silence_id])
+        self.assertEqual(third_click["silence_ids"], [silence_id])
+        self.assertEqual(post.call_count, 2)
+        for call in post.call_args_list:
+            self.assertEqual(
+                call.args[0],
+                "https://grafana.test/api/alertmanager/grafana/api/v2/silences",
+            )
+            self.assertEqual(call.kwargs["json"]["id"], silence_id)
+
+        payload = post.call_args_list[-1].kwargs["json"]
+        self.assertGreater(
+            datetime.fromisoformat(payload["endsAt"]),
+            now + timedelta(hours=5, minutes=59),
+        )
+
+    def test_silence_callbacks_are_not_deduplicated(self):
+        from unittest.mock import patch
+
+        from feishu_utils import callback_handler
+
+        callback_data = {
+            "action": {
+                "value": {
+                    "action": "silence",
+                    "maid": "maid-repeat",
+                    "duration": 7200,
+                }
+            },
+            "open_message_id": "message-repeat",
+            "open_id": "operator-repeat",
+        }
+        with patch.object(callback_handler, "handle_silence_action") as handle:
+            callback_handler.process_card_callback(callback_data, object())
+            callback_handler.process_card_callback(callback_data, object())
+
+        self.assertEqual(handle.call_count, 2)
 
 class RouteTests(unittest.TestCase):
     @classmethod
