@@ -49,6 +49,23 @@ class FeishuApiClient:
         """获取tenant_access_token"""
         return self._tenant_access_token
 
+    def get_tenant_access_token(self) -> str:
+        """返回有效的 tenant_access_token，供其他飞书 OpenAPI 调用复用。"""
+        self._authorize_tenant_access_token()
+        return self._tenant_access_token
+
+    def get_json(self, uri: str, params=None) -> dict:
+        """调用飞书 GET OpenAPI 并返回已校验的 JSON 响应。"""
+        token = self.get_tenant_access_token()
+        response = requests.get(
+            url=f"{self._lark_host}{uri}",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=FEISHU_API_TIMEOUT,
+        )
+        self._check_error_response(response)
+        return response.json()
+
     def send_text_with_open_id(self, open_id, content):
         """
         发送文本消息给用户

@@ -19,6 +19,7 @@ from flask import Flask, jsonify, request as flask_request
 # 导入配置和API客户端
 from config import config
 from feishu_utils.feishu_api import FeishuApiClient, FeishuApiException
+from feishu_utils.user_sync import sync_feishu_users
 from feishu_utils.ws_client import start_ws_client_in_thread
 
 # 配置日志（统一格式）
@@ -119,6 +120,23 @@ if __name__ == "__main__":
     logger.info("🌐 服务地址: http://%s:%s", config.HOST, config.PORT)
     logger.info("🎨 管理页面: http://%s:%s/", config.HOST, config.PORT)
     logger.info("=" * 60)
+
+    # 启动时以飞书通讯录为准全量同步姓名 -> open_id 映射。
+    # 拉取或写库失败时事务会回滚并保留旧数据，不阻断告警服务启动。
+    try:
+        sync_result = sync_feishu_users(feishu_client)
+        if sync_result.changed:
+            logger.info(
+                "✅ 飞书用户同步完成: 总数=%d, 新增=%d, 更新=%d, 删除=%d",
+                sync_result.fetched,
+                sync_result.added,
+                sync_result.updated,
+                sync_result.deleted,
+            )
+        else:
+            logger.info("✅ 飞书用户数据已是最新: 总数=%d", sync_result.fetched)
+    except Exception as error:
+        logger.error("❌ 飞书用户同步失败，保留数据库原数据并继续启动: %s", error, exc_info=True)
 
     # 启动飞书 WebSocket 长连接（守护线程，自动重连）
     start_ws_client_in_thread(config.APP_ID, config.APP_SECRET, feishu_client, debug=config.DEBUG)
