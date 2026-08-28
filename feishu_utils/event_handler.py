@@ -454,23 +454,38 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
                         "maid": maid,
                         "duration": SILENCE_DURATION_3D
                     })
-                }
-            ]
-            
-            # 电话告警时添加认领按钮
-            if incident_id:
-                silence_actions.insert(0, {
+                },
+                {
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": "📞 认领告警"
+                        "content": "📅 自定义时间"
                     },
-                    "type": "danger",
+                    "type": "default",
                     "value": json.dumps({
-                        "action": "ack_incident",
-                        "maid": maid,
-                        "incident_id": incident_id
+                        "action": "show_custom_silence",
+                        "maid": maid
                     })
+                }
+            ]
+
+            # 电话告警时添加认领按钮
+            if incident_id:
+                elements.append({
+                    "tag": "action",
+                    "actions": [{
+                        "tag": "button",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "📞 认领告警"
+                        },
+                        "type": "danger",
+                        "value": json.dumps({
+                            "action": "ack_incident",
+                            "maid": maid,
+                            "incident_id": incident_id
+                        })
+                    }]
                 })
             
             elements.append({
@@ -497,6 +512,10 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
         # 发送卡片消息
         content = json.dumps(card_data)
         message_id = feishu_client.send("chat_id", group_id, "interactive", content)
+
+        if maid and message_id:
+            from alerts_format.savedb import save_card_content
+            save_card_content(maid, content)
 
         logger.info("✅ 已向群聊 %s 发送告警卡片消息, message_id=%s", group_id, message_id)
         if mentioned_user_list:

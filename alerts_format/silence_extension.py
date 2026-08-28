@@ -25,11 +25,12 @@ def _parse_datetime(value):
 def extend_existing_silences(
     silence_base_url: str,
     silence_ids: list,
-    duration_hours: int,
+    duration_hours: int | None,
     headers: dict | None = None,
     backend: str = "Alertmanager",
+    ends_at: datetime | str | None = None,
 ) -> dict | None:
-    """Extend existing silences from their current end time.
+    """Extend existing silences or set an explicit absolute end time.
 
     Returns None when there are no IDs. A 404 marks stale IDs so callers can
     create a fresh silence; other failures are returned as errors.
@@ -40,7 +41,20 @@ def extend_existing_silences(
     headers = dict(headers or {})
     headers.setdefault("Content-Type", "application/json")
     now = datetime.now().astimezone()
-    extension = timedelta(hours=int(duration_hours))
+    absolute_end = None
+    if ends_at is not None:
+        absolute_end = (
+            _parse_datetime(ends_at)
+            if not isinstance(ends_at, datetime)
+            else ends_at.astimezone()
+        )
+        if absolute_end is None or absolute_end <= now:
+            return {"success": False, "message": "Silence end time must be in the future"}
+        extension = None
+    else:
+        extension = timedelta(hours=int(duration_hours or 0))
+        if extension.total_seconds() <= 0:
+            return {"success": False, "message": "Silence duration must be positive"}
     target_ends = []
     updated_silence_ids = []
     silence_item_base_url = silence_base_url.rstrip("/")
@@ -62,7 +76,7 @@ def extend_existing_silences(
                 return {"success": False, "message": "Invalid silence response"}
 
             current_end = _parse_datetime(silence.get("endsAt"))
-            target_end = max(current_end or now, now) + extension
+            target_end = absolute_end or (max(current_end or now, now) + extension)
             payload = {
                 key: silence[key]
                 for key in (
@@ -118,7 +132,7 @@ def extend_existing_silences(
             target_ends.append(target_end)
             updated_silence_ids.append(str(silence_id))
             logger.info(
-                "%s silence extended: silence_id=%s ends_at=%s",
+                "%s silence end updated: silence_id=%s ends_at=%s",
                 backend, silence_id, target_end.isoformat(),
             )
         except Exception as exc:
@@ -138,5 +152,9 @@ def extend_existing_silences(
         "success": True,
         "silence_ids": updated_silence_ids,
         "duration_seconds": remaining_seconds,
-        "message": f"Extended {len(silence_ids)} {backend} silence rules",
+        "message": (
+            f"Updated {len(silence_ids)} {backend} silence rules"
+            if absolute_end
+            else f"Extended {len(silence_ids)} {backend} silence rules"
+        ),
     }

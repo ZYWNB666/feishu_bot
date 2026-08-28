@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from alerts_format.ma import macreate, madelete
 from alerts_format.grafana_silence import grafana_create_silence, grafana_delete_silence
@@ -100,7 +101,94 @@ def _silence_extension_button(maid, text, duration):
     }
 
 
-def create_silence_success_card(maid, duration, operator_id=None):
+def _decode_action_value(raw_value):
+    """兼容 dict、JSON 字符串和双重 JSON 字符串形式的按钮 value。"""
+    try:
+        value = raw_value
+        while isinstance(value, str):
+            value = json.loads(value)
+        return value if isinstance(value, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def _custom_silence_picker(maid):
+    return {
+        "tag": "picker_datetime",
+        "name": "silence_until",
+        "placeholder": {
+            "tag": "plain_text",
+            "content": "选择静默截止时间",
+        },
+        "width": "default",
+        "value": {"action": "silence_until", "maid": maid},
+    }
+
+
+def create_custom_silence_picker_card(card, maid):
+    """只把同一操作行里的“自定义时间”按钮替换为日期时间选择器。"""
+    if not isinstance(card, dict):
+        return None
+
+    updated = json.loads(json.dumps(card, ensure_ascii=False))
+    elements = updated.get("elements")
+    if not isinstance(elements, list):
+        return None
+
+    for element in elements:
+        if not isinstance(element, dict) or element.get("tag") != "action":
+            continue
+        actions = element.get("actions") or []
+        for index, action in enumerate(actions):
+            if not isinstance(action, dict):
+                continue
+            if (
+                _decode_action_value(action.get("value", {})).get("action")
+                == "show_custom_silence"
+            ):
+                actions[index] = _custom_silence_picker(maid)
+                updated.setdefault("config", {})["update_multi"] = True
+                return updated
+    return None
+
+
+def _load_original_card(maid, open_message_id, feishu_client):
+    """读取原始告警卡片；选完时间后用它去掉临时日期选择框。"""
+    from alerts_format.savedb import get_card_content
+
+    content = get_card_content(maid)
+    if not content and open_message_id and hasattr(feishu_client, "get_message"):
+        message = feishu_client.get_message(open_message_id)
+        content = ((message or {}).get("body") or {}).get("content")
+    try:
+        return json.loads(content) if isinstance(content, str) else content
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _parse_silence_until(option, timezone_name=None):
+    """解析飞书 picker_datetime 返回值，例如 2026-08-28 23:15 +0800。"""
+    if not option:
+        return None
+    text = str(option).strip()
+    for fmt in ("%Y-%m-%d %H:%M %z", "%Y-%m-%d %H:%M:%S %z"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        try:
+            parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name or "Asia/Shanghai"))
+        except ZoneInfoNotFoundError:
+            return None
+    return parsed
+
+
+def create_silence_success_card(maid, duration, operator_id=None, ends_at=None):
     """
     创建静默成功的卡片
     
@@ -112,6 +200,14 @@ def create_silence_success_card(maid, duration, operator_id=None):
         dict: 飞书卡片数据
     """
     duration_text = _format_silence_duration(duration)
+    if ends_at:
+        utc_offset = ends_at.strftime("%z")
+        if len(utc_offset) == 5:
+            utc_offset = f"{utc_offset[:3]}:{utc_offset[3:]}"
+        end_text = ends_at.strftime("%Y-%m-%d %H:%M") + f" (UTC{utc_offset})"
+        summary = f"**告警 {maid} 已静默至 {end_text}**\n在此期间不会发送此告警通知"
+    else:
+        summary = f"**告警 {maid} 已静默 {duration_text}**\n在此期间不会发送此告警通知"
     
     card_data = {
         "config": {
@@ -129,7 +225,7 @@ def create_silence_success_card(maid, duration, operator_id=None):
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**告警 {maid} 已静默 {duration_text}**\n在此期间不会发送此告警通知"
+                    "content": summary
                 }
             },
             {
@@ -385,6 +481,81 @@ def handle_silence_action(maid, duration, open_message_id, feishu_client, operat
     thread.start()
 
 
+def handle_silence_until_action(
+    maid,
+    ends_at,
+    open_message_id,
+    feishu_client,
+    operator_id=None,
+):
+    """按用户选择的绝对截止时间创建或更新静默。"""
+    def process_silence_until():
+        try:
+            silence_cfg = _get_silence_config_by_maid(maid)
+            silence_type = silence_cfg.get("silence_type", "grafana")
+
+            with _silence_action_lock:
+                if silence_type == "grafana":
+                    silence_result = grafana_create_silence(
+                        maid,
+                        None,
+                        silence_cfg.get("grafana_url", ""),
+                        ends_at=ends_at,
+                    )
+                else:
+                    silence_result = macreate(maid, ends_at=ends_at)
+
+            if silence_result.get("success"):
+                remaining_seconds = silence_result.get(
+                    "duration_seconds",
+                    max(0, int((ends_at - datetime.now().astimezone()).total_seconds())),
+                )
+                silence_card = create_silence_success_card(
+                    maid,
+                    remaining_seconds,
+                    operator_id,
+                    ends_at=ends_at,
+                )
+                feishu_client.reply_message(
+                    open_message_id,
+                    "interactive",
+                    json.dumps(silence_card),
+                    reply_in_thread=True,
+                )
+                logger.info(
+                    "custom silence action completed: maid=%s silence_type=%s ends_at=%s operator_id=%s",
+                    maid, silence_type, ends_at.isoformat(), operator_id,
+                )
+            else:
+                error_msg = silence_result.get("message", "未知错误")
+                failure_card = create_failure_card(maid, "自定义静默", error_msg)
+                feishu_client.reply_message(
+                    open_message_id,
+                    "interactive",
+                    json.dumps(failure_card),
+                    reply_in_thread=True,
+                )
+                logger.error(
+                    "自定义静默创建失败: maid=%s silence_type=%s error=%s",
+                    maid, silence_type, error_msg,
+                )
+        except Exception as exc:
+            logger.error("处理自定义静默时出错: maid=%s error=%s", maid, exc, exc_info=True)
+            try:
+                failure_card = create_failure_card(maid, "自定义静默", str(exc))
+                feishu_client.reply_message(
+                    open_message_id,
+                    "interactive",
+                    json.dumps(failure_card),
+                    reply_in_thread=True,
+                )
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=process_silence_until, daemon=True)
+    thread.start()
+
+
 def handle_cancel_silence_action(maid, open_message_id, feishu_client, operator_id=None):
     """
     处理取消静默操作（异步执行）
@@ -564,7 +735,7 @@ def _update_card_after_ack(feishu_client, open_message_id, operator_id=None, mai
         return
 
     # 从数据库读取发送时保存的原始卡片 JSON
-    from alerts_format.savedb import get_card_content
+    from alerts_format.savedb import get_card_content, save_card_content
     content_str = get_card_content(maid)
     if not content_str:
         logger.warning("数据库中无原始卡片 JSON，跳过原地更新: maid=%s", maid)
@@ -642,6 +813,7 @@ def _update_card_after_ack(feishu_client, open_message_id, operator_id=None, mai
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             feishu_client.patch_message(open_message_id, card_json)
+            save_card_content(maid, card_json)
             logger.info(
                 "原卡片已原地更新为已认领状态: maid=%s message_id=%s attempt=%d/%d",
                 maid, open_message_id, attempt, MAX_RETRIES
@@ -683,9 +855,11 @@ def parse_callback_data(data):
     # 兼容两种回调格式
     if "event" in data and "action" in data["event"]:
         # 事件订阅 2.0 格式
-        action = data["event"]["action"]
-        open_message_id = data["event"]["context"]["open_message_id"]
-        open_id = data["event"]["operator"]["open_id"]
+        event = data["event"]
+        action = event["action"]
+        context = event.get("context") or data.get("context") or {}
+        open_message_id = context.get("open_message_id")
+        open_id = (event.get("operator") or {}).get("open_id")
     else:
         # 旧版格式
         action = data.get("action", {})
@@ -695,16 +869,8 @@ def parse_callback_data(data):
     action_value_raw = action.get("value", {})
     
     # SDK 传来的 value 可能是 dict（新版）或 JSON 字符串（旧版/双重转义）
-    try:
-        if isinstance(action_value_raw, dict):
-            action_value = action_value_raw
-        elif isinstance(action_value_raw, str):
-            action_value = json.loads(action_value_raw)
-            if isinstance(action_value, str):
-                action_value = json.loads(action_value)
-        else:
-            action_value = {}
-    except json.JSONDecodeError:
+    action_value = _decode_action_value(action_value_raw)
+    if not action_value:
         logger.error("解析回调数据失败")
         return None, None, None, None
     
@@ -713,6 +879,8 @@ def parse_callback_data(data):
         logger.error("回调数据格式错误")
         return None, None, None, None
     
+    action_value["_option"] = action.get("option")
+    action_value["_timezone"] = action.get("timezone")
     action_type = action_value.get("action")
     
     return action_type, action_value, open_message_id, open_id
@@ -733,7 +901,10 @@ def is_duplicate_callback(action_type, action_value, open_message_id):
     Returns:
         bool: True 表示重复，False 表示不重复
     """
-    callback_key = f"{open_message_id}_{action_type}_{action_value.get('maid')}"
+    callback_key = (
+        f"{open_message_id}_{action_type}_{action_value.get('maid')}_"
+        f"{action_value.get('_option') or ''}"
+    )
 
     if _callback_cache.mark(callback_key):
         logger.info("duplicate callback ignored: maid=%s action=%s message_id=%s", action_value.get('maid'), action_type, open_message_id)
@@ -770,6 +941,57 @@ def process_card_callback(data, feishu_client):
         # 去重检查
         if action_type != "silence" and is_duplicate_callback(action_type, action_value, open_message_id):
             return {}
+
+        if action_type == "show_custom_silence":
+            original_card = _load_original_card(maid, open_message_id, feishu_client)
+            picker_card = create_custom_silence_picker_card(original_card, maid)
+            if not picker_card:
+                logger.error("无法展开自定义时间选择器: maid=%s message_id=%s", maid, open_message_id)
+                return {
+                    "toast": {
+                        "type": "error",
+                        "content": "无法加载原告警卡片，请在新告警卡片上重试",
+                    }
+                }
+            return {
+                "toast": {"type": "info", "content": "请选择静默截止时间"},
+                "card": {"type": "raw", "data": picker_card},
+            }
+
+        if action_type == "silence_until":
+            ends_at = _parse_silence_until(
+                action_value.get("_option"),
+                action_value.get("_timezone"),
+            )
+            if ends_at is None:
+                return {
+                    "toast": {"type": "error", "content": "无法识别所选时间，请重新选择"}
+                }
+            if ends_at <= datetime.now().astimezone():
+                return {
+                    "toast": {"type": "error", "content": "静默截止时间必须晚于当前时间"}
+                }
+
+            logger.info(
+                "custom silence action received: maid=%s ends_at=%s timezone=%s message_id=%s operator_id=%s",
+                maid, ends_at.isoformat(), action_value.get("_timezone"), open_message_id, open_id,
+            )
+            handle_silence_until_action(
+                maid, ends_at, open_message_id, feishu_client, open_id
+            )
+
+            # 选中有效时间后立即恢复原卡片，去掉临时日期选择框。
+            response = {
+                "toast": {
+                    "type": "success",
+                    "content": f"正在设置静默至 {ends_at.strftime('%Y-%m-%d %H:%M')}",
+                }
+            }
+            original_card = _load_original_card(maid, open_message_id, feishu_client)
+            if isinstance(original_card, dict):
+                original_card.setdefault("config", {})["update_multi"] = True
+                response["card"] = {"type": "raw", "data": original_card}
+            return response
         
         # 处理静默操作
         if action_type == "silence":

@@ -776,8 +776,8 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
         # 保存 message_id 供后续 resolved/静默话题回复
         if maid:
             update_message_id(maid, message_id)
-            # 保存原始卡片 JSON，认领时原地更新卡片使用（仅 biz 模板）
-            if incident_id and content:
+            # 保存原始卡片 JSON，供认领更新和自定义时间选择后恢复卡片使用。
+            if content:
                 save_card_content(maid, content)
         return {
             'alert_id': config_row.get('alert_id'),

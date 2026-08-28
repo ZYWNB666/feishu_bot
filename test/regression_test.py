@@ -257,6 +257,23 @@ class AlertLifecycleTests(unittest.TestCase):
         self.assertTrue(
             any(element.get("tag") == "action" for element in card["elements"])
         )
+        custom_row = next(
+            element
+            for element in card["elements"]
+            if element.get("tag") == "action"
+            and any(
+                button.get("text", {}).get("content") == "📅 自定义时间"
+                for button in element.get("actions", [])
+            )
+        )
+        button_texts = [
+            button.get("text", {}).get("content")
+            for button in custom_row["actions"]
+        ]
+        self.assertEqual(
+            button_texts.index("📅 自定义时间"),
+            button_texts.index("🔕 静默2小时") + 1,
+        )
 
     def test_aggregated_batch_returns_500_when_every_route_fails(self):
         from feishu_utils import alert_handler
@@ -355,6 +372,160 @@ class PhoneAlertFallbackTests(unittest.TestCase):
         self.assertIn("\u7f51\u7edc\u4e0d\u53ef\u8fbe", card_text)
 
 class SilenceExtensionTests(unittest.TestCase):
+    def test_ops_card_keeps_all_silence_options_and_custom_time_on_one_row(self):
+        from feishu_utils.event_handler import alert_to_feishu
+
+        class FakeFeishuClient:
+            def __init__(self):
+                self.content = None
+
+            def send(self, receive_id_type, receive_id, msg_type, content):
+                self.content = content
+                return "message-ops-custom"
+
+        client = FakeFeishuClient()
+        with patch("alerts_format.savedb.save_card_content"):
+            alert_to_feishu(
+                client,
+                "test alert",
+                [],
+                "chat-ops-custom",
+                maid="maid-ops-custom",
+                incident_id="incident-ops-custom",
+            )
+
+        card = json.loads(client.content)
+        action_rows = [item for item in card["elements"] if item.get("tag") == "action"]
+        silence_row = next(
+            row
+            for row in action_rows
+            if any(
+                button.get("text", {}).get("content") == "📅 自定义时间"
+                for button in row["actions"]
+            )
+        )
+        button_texts = [button["text"]["content"] for button in silence_row["actions"]]
+        self.assertEqual(
+            button_texts,
+            [
+                "🔕 静默2小时",
+                "🔕 静默12小时",
+                "🔕 静默24小时",
+                "🔕 静默3天",
+                "📅 自定义时间",
+            ],
+        )
+        self.assertTrue(
+            any(
+                row["actions"][0].get("text", {}).get("content") == "📞 认领告警"
+                for row in action_rows
+                if len(row["actions"]) == 1
+            )
+        )
+
+    def test_custom_picker_replaces_only_button_in_same_action_row(self):
+        from feishu_utils.callback_handler import create_custom_silence_picker_card
+
+        original = {
+            "config": {"wide_screen_mode": True, "update_multi": True},
+            "elements": [{
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🔕 静默2小时"},
+                        "value": {"action": "silence", "maid": "maid-picker", "duration": 7200},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "📅 自定义时间"},
+                        "value": {"action": "show_custom_silence", "maid": "maid-picker"},
+                    },
+                ],
+            }],
+        }
+
+        updated = create_custom_silence_picker_card(original, "maid-picker")
+        actions = updated["elements"][0]["actions"]
+
+        self.assertEqual(len(actions), 2)
+        self.assertEqual(actions[0]["tag"], "button")
+        self.assertEqual(actions[1]["tag"], "picker_datetime")
+        self.assertEqual(actions[1]["value"]["action"], "silence_until")
+
+    def test_custom_time_selection_restores_original_card(self):
+        from feishu_utils import callback_handler
+
+        original = {
+            "config": {"wide_screen_mode": True, "update_multi": True},
+            "elements": [{
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "🔕 静默2小时"},
+                        "value": {"action": "silence", "maid": "maid-restore", "duration": 7200},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "📅 自定义时间"},
+                        "value": {"action": "show_custom_silence", "maid": "maid-restore"},
+                    },
+                ],
+            }],
+        }
+        callback_data = {
+            "schema": "2.0",
+            "event": {
+                "operator": {"open_id": "operator-restore"},
+                "context": {"open_message_id": "message-restore"},
+                "action": {
+                    "tag": "picker_datetime",
+                    "timezone": "Asia/Shanghai",
+                    "option": "2099-08-28 23:15 +0800",
+                    "value": {"action": "silence_until", "maid": "maid-restore"},
+                },
+            },
+        }
+
+        with (
+            patch.object(callback_handler, "_load_original_card", return_value=original),
+            patch.object(callback_handler, "handle_silence_until_action") as handle,
+        ):
+            result = callback_handler.process_card_callback(callback_data, object())
+
+        handle.assert_called_once()
+        restored_text = json.dumps(result["card"]["data"], ensure_ascii=False)
+        self.assertIn("📅 自定义时间", restored_text)
+        self.assertNotIn("picker_datetime", restored_text)
+
+    def test_show_custom_time_returns_picker_card(self):
+        from feishu_utils import callback_handler
+
+        original = {
+            "config": {"wide_screen_mode": True},
+            "elements": [{
+                "tag": "action",
+                "actions": [{
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "📅 自定义时间"},
+                    "value": {"action": "show_custom_silence", "maid": "maid-show-picker"},
+                }],
+            }],
+        }
+        callback_data = {
+            "action": {
+                "value": {"action": "show_custom_silence", "maid": "maid-show-picker"},
+            },
+            "open_message_id": "message-show-picker",
+            "open_id": "operator-show-picker",
+        }
+
+        with patch.object(callback_handler, "_load_original_card", return_value=original):
+            result = callback_handler.process_card_callback(callback_data, object())
+
+        self.assertIn("picker_datetime", json.dumps(result["card"]["data"]))
+
     def test_silence_success_card_has_all_extension_options_and_warning(self):
         from feishu_utils.callback_handler import create_silence_success_card
 
@@ -467,6 +638,42 @@ class SilenceExtensionTests(unittest.TestCase):
             current_end + timedelta(hours=1, minutes=59),
         )
         self.assertNotIn("status", payload)
+
+    def test_existing_silence_can_be_set_to_an_absolute_end(self):
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import Mock, patch
+
+        from alerts_format.silence_extension import extend_existing_silences
+
+        now = datetime.now(timezone.utc)
+        chosen_end = now + timedelta(days=2, hours=3, minutes=17)
+        get_response = Mock(status_code=200)
+        get_response.json.return_value = {
+            "id": "silence-absolute",
+            "matchers": [{"name": "alertname", "value": "Test", "isEqual": True}],
+            "startsAt": now.isoformat(),
+            "endsAt": (now + timedelta(days=7)).isoformat(),
+            "createdBy": "feishu_bot",
+            "comment": "test",
+        }
+        post_response = Mock(status_code=200)
+        post_response.json.return_value = {"silenceID": "silence-absolute"}
+
+        with (
+            patch("alerts_format.silence_extension.requests.get", return_value=get_response),
+            patch("alerts_format.silence_extension.requests.post", return_value=post_response) as post,
+        ):
+            result = extend_existing_silences(
+                "https://alertmanager.test/api/v2/silence",
+                ["silence-absolute"],
+                None,
+                backend="Alertmanager",
+                ends_at=chosen_end,
+            )
+
+        self.assertTrue(result["success"])
+        payload_end = datetime.fromisoformat(post.call_args.kwargs["json"]["endsAt"])
+        self.assertEqual(payload_end, chosen_end.astimezone())
 
     def test_three_grafana_clicks_keep_one_id_and_add_six_hours(self):
         from datetime import datetime, timedelta, timezone

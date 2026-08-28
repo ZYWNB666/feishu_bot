@@ -61,13 +61,19 @@ def _clear_silence_ids(maid: str) -> None:
         logger.error("清空 silence ID 失败: maid=%s error=%s", maid, e)
 
 
-def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> dict:
+def grafana_create_silence(
+    maid: str,
+    duration_hours: int | None,
+    grafana_url: str,
+    ends_at: datetime | None = None,
+) -> dict:
     """
     向 Grafana 内置 Alertmanager 创建静默规则
 
     :param maid: 告警 MAID
-    :param duration_hours: 静默时长（小时）
+    :param duration_hours: 静默时长（小时），与 ends_at 二选一
     :param grafana_url: Grafana 地址，如 https://grafana.example.com
+    :param ends_at: 绝对静默截止时间（带时区的 datetime）
     :return: {"success": bool, "message": str, ...}
     """
     api_key = Config.GRAFANA_API_KEY
@@ -76,7 +82,21 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
     if not grafana_url:
         return {"success": False, "message": "未配置 grafana_url"}
 
-    logger.info("Grafana silence create started: maid=%s duration_hours=%s grafana_url=%s", maid, duration_hours, grafana_url)
+    now = datetime.now().astimezone()
+    if ends_at is not None:
+        target_end = ends_at.astimezone()
+        if target_end <= now:
+            return {"success": False, "message": "静默截止时间必须晚于当前时间"}
+    else:
+        duration_hours = int(duration_hours or 0)
+        if duration_hours <= 0:
+            return {"success": False, "message": "静默时长必须大于 0"}
+        target_end = now + timedelta(hours=duration_hours)
+
+    logger.info(
+        "Grafana silence create started: maid=%s duration_hours=%s ends_at=%s grafana_url=%s",
+        maid, duration_hours, target_end.isoformat(), grafana_url,
+    )
     row = _get_alert_data(maid)
     if not row:
         return {"success": False, "message": f"未找到 MAID={maid} 的记录"}
@@ -109,20 +129,22 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
             duration_hours,
             headers={"Authorization": f"Bearer {api_key}"},
             backend="Grafana",
+            ends_at=target_end if ends_at is not None else None,
         )
         if extension_result and extension_result.get("success"):
             updated_silence_ids = extension_result.get("silence_ids", existing_silence_ids)
             _save_silence_ids(maid, updated_silence_ids)
             extension_result["message"] = (
-                f"成功延长 {len(existing_silence_ids)} 个 Grafana 静默规则"
+                f"成功更新 {len(existing_silence_ids)} 个 Grafana 静默规则的截止时间"
+                if ends_at is not None
+                else f"成功延长 {len(existing_silence_ids)} 个 Grafana 静默规则"
             )
             return extension_result
         if extension_result and not extension_result.get("not_found"):
             return extension_result
 
-    now = datetime.now().astimezone()
     starts_at = now.isoformat(timespec='milliseconds')
-    ends_at = (now + timedelta(hours=duration_hours)).isoformat(timespec='milliseconds')
+    ends_at_text = target_end.isoformat(timespec='milliseconds')
 
     headers = {
         "Content-Type": "application/json",
@@ -140,7 +162,7 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
         body = {
             "matchers": matchers,
             "startsAt": starts_at,
-            "endsAt": ends_at,
+            "endsAt": ends_at_text,
             "comment": f"Feishu Bot - MAID: {maid}",
             "createdBy": "feishu_bot",
         }
@@ -164,6 +186,7 @@ def grafana_create_silence(maid: str, duration_hours: int, grafana_url: str) -> 
         return {
             "success": True,
             "silence_ids": silence_ids,
+            "duration_seconds": max(0, int((target_end - now).total_seconds())),
             "message": f"成功创建 {len(silence_ids)} 个 Grafana 静默规则",
         }
     return {"success": False, "message": "所有静默规则创建失败"}

@@ -112,6 +112,12 @@ def _silence_buttons(maid: str) -> dict:
                 "type": "primary",
                 "value": {"action": "silence", "maid": maid, "duration": SILENCE_DURATION_2H},
             },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "📅 自定义时间"},
+                "type": "default",
+                "value": {"action": "show_custom_silence", "maid": maid},
+            },
         ],
     }
 
@@ -146,6 +152,12 @@ def _grafana_buttons(grafana_urls: dict, maid: str = None, incident_id: str = No
             "text": {"tag": "plain_text", "content": "🔕 静默2小时"},
             "type": "primary",
             "value": {"action": "silence", "maid": maid, "duration": SILENCE_DURATION_2H},
+        })
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "📅 自定义时间"},
+            "type": "default",
+            "value": {"action": "show_custom_silence", "maid": maid},
         })
     return {"tag": "action", "actions": actions} if actions else None
 

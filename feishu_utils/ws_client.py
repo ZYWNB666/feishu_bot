@@ -41,14 +41,14 @@ def _make_card_action_bridge(feishu_client):
     返回卡片回调桥接函数，将 P2CardActionTrigger 转为 dict 后交给现有回调处理逻辑。
     """
     def bridge(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
+        result = {}
         try:
             raw = json.loads(lark.JSON.marshal(data))
             logger.debug("WS 收到卡片回调: %s", raw)
-            process_card_callback(raw, feishu_client)
+            result = process_card_callback(raw, feishu_client) or {}
         except Exception as e:
             logger.error("WS 卡片回调处理失败: %s", e, exc_info=True)
-        # 飞书要求必须返回响应对象，返回空 toast 即可
-        return P2CardActionTriggerResponse({})
+        return P2CardActionTriggerResponse(result)
     return bridge
 
 

@@ -126,16 +126,30 @@ def madelete(maid):
         }
 
 
-def macreate(maid, matime):
+def macreate(maid, matime=None, ends_at=None):
     """
     创建告警静默
     :param maid: 告警ID
-    :param matime: 静默时长（小时）
+    :param matime: 静默时长（小时），与 ends_at 二选一
+    :param ends_at: 绝对静默截止时间（带时区的 datetime）
     :return: 响应结果
     """
     try:
-        matime_hours = int(matime)
-        logger.info("Alertmanager silence create started: maid=%s duration_hours=%s", maid, matime)
+        now = datetime.now().astimezone()
+        if ends_at is not None:
+            target_end = ends_at.astimezone()
+            if target_end <= now:
+                return {"success": False, "message": "静默截止时间必须晚于当前时间"}
+            matime_hours = None
+        else:
+            matime_hours = int(matime)
+            if matime_hours <= 0:
+                return {"success": False, "message": "静默时长必须大于 0"}
+            target_end = now + timedelta(hours=matime_hours)
+        logger.info(
+            "Alertmanager silence create started: maid=%s duration_hours=%s ends_at=%s",
+            maid, matime_hours, target_end.isoformat(),
+        )
         result = _get_alert_data_and_alertmanager_url(maid)
         if not result:
             logger.error("没有找到告警记录: maid=%s", maid)
@@ -174,6 +188,7 @@ def macreate(maid, matime):
                 existing_silence_ids,
                 matime_hours,
                 backend="Alertmanager",
+                ends_at=target_end if ends_at is not None else None,
             )
             if extension_result and extension_result.get("success"):
                 updated_silence_ids = extension_result.get("silence_ids", existing_silence_ids)
@@ -184,17 +199,16 @@ def macreate(maid, matime):
                     )
                     conn.commit()
                 extension_result["message"] = (
-                    f"成功延长 {len(existing_silence_ids)} 个 Alertmanager 静默规则"
+                    f"成功更新 {len(existing_silence_ids)} 个 Alertmanager 静默规则的截止时间"
+                    if ends_at is not None
+                    else f"成功延长 {len(existing_silence_ids)} 个 Alertmanager 静默规则"
                 )
                 return extension_result
             if extension_result and not extension_result.get("not_found"):
                 return extension_result
 
-        now = datetime.now().astimezone()
         startsAttime = now.isoformat()
-
-        end_now = now + timedelta(hours=matime_hours)
-        endsAttime = end_now.isoformat()
+        endsAttime = target_end.isoformat()
 
         silence_id_list = []  # 创建一个列表来存储所有的silenceID
 
@@ -273,6 +287,7 @@ def macreate(maid, matime):
         return {
             "success": True,
             "silence_ids": silence_id_list,
+            "duration_seconds": max(0, int((target_end - now).total_seconds())),
             "message": f"成功创建 {len(silence_id_list)} 个静默规则"
         }
 
