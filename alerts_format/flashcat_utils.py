@@ -24,6 +24,60 @@ logger = logging.getLogger(__name__)
 
 FLASHCAT_API_BASE = "https://api.flashcat.cloud"
 
+
+class FlashcatResponseError(RuntimeError):
+    """Flashcat 返回了无法确认成功的 HTTP/JSON 响应。"""
+
+
+def _validate_flashcat_response(resp, operation: str, maid: str = None,
+                                incident_id: str = None) -> dict:
+    """记录并校验 Flashcat 的通用 ``{request_id, error, data}`` 响应。"""
+    body = resp.text
+    header_request_id = resp.headers.get("Flashcat-Request-Id", "")
+    logger.info(
+        "Flashcat API 完整响应: operation=%s maid=%s incident_id=%s "
+        "status=%s request_id_header=%s body=%s",
+        operation, maid, incident_id, resp.status_code, header_request_id, body,
+    )
+
+    # 先校验 HTTP 状态；响应正文已经在上面完整记录，即使抛异常也不会丢失。
+    resp.raise_for_status()
+
+    try:
+        result = resp.json()
+    except ValueError as exc:
+        raise FlashcatResponseError(
+            f"Flashcat {operation} 响应不是有效 JSON: {exc}"
+        ) from exc
+
+    if not isinstance(result, dict):
+        raise FlashcatResponseError(
+            f"Flashcat {operation} 响应格式错误: 顶层类型为 {type(result).__name__}"
+        )
+
+    request_id = result.get("request_id") or header_request_id
+    if not isinstance(request_id, str) or not request_id:
+        raise FlashcatResponseError(
+            f"Flashcat {operation} 响应缺少有效的 request_id"
+        )
+
+    error = result.get("error")
+    if error is not None:
+        if not isinstance(error, dict):
+            raise FlashcatResponseError(
+                f"Flashcat {operation} error 字段格式错误: {error!r}"
+            )
+        code = str(error.get("code", ""))
+        if code and code != "0" and code.upper() != "OK":
+            message = error.get("message", "")
+            raise FlashcatResponseError(
+                f"Flashcat {operation} 业务失败: code={code} "
+                f"message={message} request_id={request_id}"
+            )
+
+    return result
+
+
 def probe_flashcat_api(maid: str = None) -> tuple[bool, str]:
     """Probe Flashcat reachability before attempting a phone alert."""
     try:
@@ -405,15 +459,20 @@ def ack_incident(app_key: str, incident_id: str, maid: str = None) -> bool:
 
     url = f"{FLASHCAT_API_BASE}/incident/ack?app_key={app_key}"
     payload = {"incident_ids": [incident_id]}
+    ack_accepted = False
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.post(url, json=payload, timeout=FLASHCAT_API_TIMEOUT)
-            resp.raise_for_status()
-            logger.info(
-                "Flashcat incident 认领成功: maid=%s incident_id=%s attempt=%d/%d",
-                maid, incident_id, attempt, MAX_RETRIES
+            result = _validate_flashcat_response(
+                resp, "incident/ack", maid=maid, incident_id=incident_id
             )
-            return True
+            logger.info(
+                "Flashcat incident ACK 响应校验通过: maid=%s incident_id=%s "
+                "request_id=%s attempt=%d/%d",
+                maid, incident_id, result.get("request_id", ""), attempt, MAX_RETRIES
+            )
+            ack_accepted = True
+            break
         except Exception as e:
             if attempt < MAX_RETRIES:
                 wait = attempt * RETRY_BACKOFF_BASE
@@ -429,3 +488,81 @@ def ack_incident(app_key: str, incident_id: str, maid: str = None) -> bool:
                     maid, incident_id, MAX_RETRIES, e
                 )
                 return False
+
+    if not ack_accepted:
+        return False
+
+    # ACK 接口通过后回查 incident/info。只有 Flashcat 已经落下认领状态，
+    # 才允许上层把飞书卡片更新为“已认领”。
+    info_url = f"{FLASHCAT_API_BASE}/incident/info?app_key={app_key}"
+    info_payload = {"incident_id": incident_id}
+    last_ack_time = 0
+    last_progress = ""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.post(
+                info_url, json=info_payload, timeout=FLASHCAT_API_TIMEOUT
+            )
+            result = _validate_flashcat_response(
+                resp, "incident/info", maid=maid, incident_id=incident_id
+            )
+            data = result.get("data")
+            if not isinstance(data, dict):
+                raise FlashcatResponseError(
+                    "Flashcat incident/info 响应缺少有效的 data 对象"
+                )
+            returned_incident_id = data.get("incident_id", "")
+            if returned_incident_id != incident_id:
+                raise FlashcatResponseError(
+                    "Flashcat incident/info 返回的 incident_id 不匹配: "
+                    f"expected={incident_id} actual={returned_incident_id}"
+                )
+
+            last_ack_time = data.get("ack_time", 0)
+            last_progress = data.get("progress", "")
+            if (
+                isinstance(last_ack_time, int)
+                and last_ack_time > 0
+                and last_progress in ("Processing", "Closed")
+            ):
+                logger.info(
+                    "Flashcat incident 认领状态确认成功: maid=%s incident_id=%s "
+                    "ack_time=%s progress=%s request_id=%s attempt=%d/%d",
+                    maid, incident_id, last_ack_time, last_progress,
+                    result.get("request_id", ""), attempt, MAX_RETRIES,
+                )
+                return True
+
+            if attempt < MAX_RETRIES:
+                wait = attempt * RETRY_BACKOFF_BASE
+                logger.warning(
+                    "Flashcat incident ACK 已受理但认领状态尚未生效: maid=%s "
+                    "incident_id=%s ack_time=%s progress=%s attempt=%d/%d "
+                    "retry_in=%ds",
+                    maid, incident_id, last_ack_time, last_progress,
+                    attempt, MAX_RETRIES, wait,
+                )
+                time.sleep(wait)
+        except Exception as e:
+            if attempt < MAX_RETRIES:
+                wait = attempt * RETRY_BACKOFF_BASE
+                logger.warning(
+                    "查询 Flashcat incident 认领状态失败: maid=%s incident_id=%s "
+                    "attempt=%d/%d error=%s retry_in=%ds",
+                    maid, incident_id, attempt, MAX_RETRIES, e, wait,
+                )
+                time.sleep(wait)
+            else:
+                logger.error(
+                    "查询 Flashcat incident 认领状态失败: maid=%s incident_id=%s "
+                    "attempts=%d error=%s",
+                    maid, incident_id, MAX_RETRIES, e,
+                )
+                return False
+
+    logger.error(
+        "Flashcat incident 认领状态确认失败: maid=%s incident_id=%s "
+        "ack_time=%s progress=%s attempts=%d",
+        maid, incident_id, last_ack_time, last_progress, MAX_RETRIES,
+    )
+    return False

@@ -53,6 +53,21 @@ class _FakeConnection:
         self.closed = True
 
 
+class _FakeHTTPResponse:
+    def __init__(self, body, status_code=200, headers=None):
+        self._body = body
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.text = json.dumps(body, ensure_ascii=False)
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if not 200 <= self.status_code < 300:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
 class ConnectionPoolTests(unittest.TestCase):
     def test_waits_for_a_connection_during_a_short_burst(self):
         from db import pool as pool_module
@@ -770,6 +785,111 @@ class SilenceExtensionTests(unittest.TestCase):
             callback_handler.process_card_callback(callback_data, object())
 
         self.assertEqual(handle.call_count, 2)
+
+class FlashcatAckTests(unittest.TestCase):
+    def test_ack_validates_response_and_confirms_incident_state(self):
+        from alerts_format import flashcat_utils
+
+        incident_id = "69da451ef77b1b51f40e83ee"
+        ack_response = _FakeHTTPResponse(
+            {"request_id": "req-ack", "data": {}},
+            headers={"Flashcat-Request-Id": "req-ack-header"},
+        )
+        info_response = _FakeHTTPResponse({
+            "request_id": "req-info",
+            "data": {
+                "incident_id": incident_id,
+                "ack_time": 1775972200,
+                "progress": "Processing",
+                "full_response_marker": "x" * 600 + "must-not-be-truncated",
+            },
+        })
+
+        with (
+            patch.object(
+                flashcat_utils.requests,
+                "post",
+                side_effect=[ack_response, info_response],
+            ) as post,
+            patch.object(flashcat_utils, "MAX_RETRIES", 1),
+            self.assertLogs(flashcat_utils.logger, level="INFO") as logs,
+        ):
+            success = flashcat_utils.ack_incident(
+                "test-app-key", incident_id, maid="maid-ack"
+            )
+
+        self.assertTrue(success)
+        self.assertEqual(post.call_count, 2)
+        self.assertTrue(
+            post.call_args_list[0].args[0].endswith(
+                "/incident/ack?app_key=test-app-key"
+            )
+        )
+        self.assertEqual(
+            post.call_args_list[0].kwargs["json"],
+            {"incident_ids": [incident_id]},
+        )
+        self.assertTrue(
+            post.call_args_list[1].args[0].endswith(
+                "/incident/info?app_key=test-app-key"
+            )
+        )
+        self.assertEqual(
+            post.call_args_list[1].kwargs["json"],
+            {"incident_id": incident_id},
+        )
+        output = "\n".join(logs.output)
+        self.assertIn('"request_id": "req-ack"', output)
+        self.assertIn("must-not-be-truncated", output)
+        self.assertIn("认领状态确认成功", output)
+
+    def test_ack_rejects_business_error_even_when_http_is_200(self):
+        from alerts_format import flashcat_utils
+
+        response = _FakeHTTPResponse({
+            "request_id": "req-business-error",
+            "error": {
+                "code": "InvalidParameter",
+                "message": "incident cannot be acknowledged",
+            },
+        })
+        with (
+            patch.object(flashcat_utils.requests, "post", return_value=response) as post,
+            patch.object(flashcat_utils, "MAX_RETRIES", 1),
+        ):
+            success = flashcat_utils.ack_incident(
+                "test-app-key", "69da451ef77b1b51f40e83ee", maid="maid-error"
+            )
+
+        self.assertFalse(success)
+        # 业务响应失败时不能继续查询状态，更不能让上层更新飞书卡片。
+        self.assertEqual(post.call_count, 1)
+
+    def test_ack_fails_when_follow_up_state_is_not_acknowledged(self):
+        from alerts_format import flashcat_utils
+
+        incident_id = "69da451ef77b1b51f40e83ee"
+        responses = [
+            _FakeHTTPResponse({"request_id": "req-ack", "data": {}}),
+            _FakeHTTPResponse({
+                "request_id": "req-info",
+                "data": {
+                    "incident_id": incident_id,
+                    "ack_time": 0,
+                    "progress": "Triggered",
+                },
+            }),
+        ]
+        with (
+            patch.object(flashcat_utils.requests, "post", side_effect=responses),
+            patch.object(flashcat_utils, "MAX_RETRIES", 1),
+        ):
+            success = flashcat_utils.ack_incident(
+                "test-app-key", incident_id, maid="maid-not-acked"
+            )
+
+        self.assertFalse(success)
+
 
 class RouteTests(unittest.TestCase):
     @classmethod
