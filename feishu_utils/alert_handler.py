@@ -13,6 +13,8 @@ import hashlib
 import json
 import logging
 import threading
+import time
+from datetime import timezone
 
 from config.config import Config
 from config.constants import (
@@ -188,6 +190,7 @@ from alerts_format.savedb import (
 )
 from feishu_utils.event_handler import alert_to_feishu
 from feishu_utils.alert_card_biz import build_biz_firing_card, build_biz_resolved_card
+from feishu_utils import trend_gate
 
 logger = logging.getLogger(__name__)
 
@@ -311,8 +314,10 @@ def process_alert_request(data, feishu_client):
         # 已聚合的批次（_aggregated=True）跳过拆分，直接走单批次处理流程
         sub_payloads = _split_by_alert(data) if not data.get('_aggregated') else [data]
         if len(sub_payloads) > 1:
-            # 按 alertname 聚合同名 firing 子批次，减少发送的卡片数量
-            sub_payloads = _group_and_aggregate_by_alertname(sub_payloads)
+            # 趋势试点必须逐实例判断；其他规则继续按原逻辑聚合。
+            trend_subs = [sub for sub in sub_payloads if trend_gate.is_enabled_for(sub)]
+            normal_subs = [sub for sub in sub_payloads if not trend_gate.is_enabled_for(sub)]
+            sub_payloads = trend_subs + _group_and_aggregate_by_alertname(normal_subs)
             logger.info("批次含 %d 条 alert，拆分+聚合后 %d 个子批次独立路由",
                         len(data.get('alerts', [])), len(sub_payloads))
             all_responses = []
@@ -348,6 +353,9 @@ def process_alert_request(data, feishu_client):
                 "data": all_responses,
                 "summary": {"total": all_total, "success": success_count, "failed": all_failed}
             }, 500 if all_routes_failed else 200
+
+        if trend_gate.is_enabled_for(data):
+            return _process_trend_request(data, feishu_client)
 
         # 去重逻辑（第一层：fingerprint 级别）：
         # - firing 批次：5 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递）
@@ -555,7 +563,116 @@ def _find_alert_configs(data):
     return configs
 
 
-def _process_single_alert_config(data, config_row, alertname, feishu_client):
+def _process_trend_request(data, feishu_client):
+    """试点规则的逐路由决策；观察中的告警不进入旧的内存去重缓存。"""
+    configs = _find_alert_configs(data)
+    if not configs:
+        return {"error": "未找到匹配的告警配置"}, 404
+
+    alertname = extract_alertname(data)
+    responses = []
+    failed = 0
+    for config_row in configs:
+        key = trend_gate.state_key(data, config_row['group_id'])
+        try:
+            with trend_gate.lock_for(key):
+                response = _process_trend_config(data, config_row, alertname, feishu_client, key)
+        except Exception:
+            logger.exception("趋势告警路由处理失败: %s", key)
+            response = None
+        if response:
+            responses.append(response)
+            if not response.get('success'):
+                failed += 1
+        else:
+            responses.append({'group_id': key[1], 'success': False, 'error': '发送失败'})
+            failed += 1
+
+    total = len(responses)
+    return {
+        'code': 500 if failed == total else 0,
+        'msg': '所有路由发送失败' if failed == total else 'success',
+        'data': responses,
+        'summary': {'total': total, 'success': total - failed, 'failed': failed},
+    }, 500 if failed == total else 200
+
+
+def _process_trend_config(data, config_row, alertname, feishu_client, key):
+    try:
+        state = trend_gate.get_state(key)
+    except Exception:
+        logger.exception("趋势状态读取失败，按原流程发送: %s", key)
+        return _process_single_alert_config(data, config_row, alertname, feishu_client)
+
+    if _is_all_resolved(data):
+        if state and state['status'] in ('pending', 'resolved') and not state.get('last_sent_at'):
+            trend_gate.mark_resolved(key, '观察期内恢复，未发送 firing')
+            return {'group_id': key[1], 'success': True, 'skipped': True,
+                    'reason': '观察期内恢复'}
+        response = _process_single_alert_config(data, config_row, alertname, feishu_client)
+        if response and response.get('success'):
+            try:
+                trend_gate.mark_resolved(key, '已处理恢复通知')
+            except Exception:
+                logger.exception("恢复通知已发送，但状态更新失败: %s", key)
+        return response
+
+    first_seen = (state['first_seen'].replace(tzinfo=timezone.utc).timestamp()
+                  if state and state['status'] == 'pending' else time.time())
+    try:
+        decision = trend_gate.decide(data, first_seen)
+    except Exception:
+        logger.exception("指标趋势查询失败，立即发送: rule_uid=%s", key[0])
+        decision = trend_gate.Decision('send', None, '指标查询失败，按原流程发送')
+    trend_gate.log_decision(key, decision)
+
+    if state and state['status'] == 'sent':
+        prior = state.get('last_value')
+        worsened = (decision.action == 'send' and prior is not None
+                    and decision.value is not None and decision.value >= prior * 1.25)
+        if not worsened:
+            reason = ('5 分钟内重复投递' if trend_gate.duplicate_sent(state)
+                      else '同一轮告警已通知，未明显恶化')
+            return {'group_id': key[1], 'success': True, 'skipped': True, 'reason': reason}
+
+    if decision.action == 'cancel':
+        try:
+            if not state or state['status'] != 'pending':
+                trend_gate.save_pending(key, config_row['id'], data, first_seen, decision.reason)
+            trend_gate.mark_resolved(key, decision.reason)
+        except Exception:
+            logger.exception("恢复状态写入失败，按原流程发送: %s", key)
+            return _process_single_alert_config(data, config_row, alertname, feishu_client)
+        return {'group_id': key[1], 'success': True, 'skipped': True,
+                'reason': decision.reason}
+
+    try:
+        trend_gate.save_pending(key, config_row['id'], data, first_seen, decision.reason)
+    except Exception:
+        logger.exception("趋势状态写入失败，按原流程发送: %s", key)
+        return _process_single_alert_config(data, config_row, alertname, feishu_client)
+
+    if decision.action == 'observe':
+        return {'group_id': key[1], 'success': True, 'skipped': True,
+                'reason': decision.reason}
+
+    send_data = trend_gate.with_decision_note(data, decision)
+    response = _process_single_alert_config(
+        send_data, config_row, alertname, feishu_client,
+        mention_oncall=trend_gate.oncall_mention_policy(
+            decision, state.get('last_value') if state else None),
+    )
+    try:
+        if response and response.get('message_id'):
+            trend_gate.mark_sent(key, decision.value, decision.reason)
+        else:
+            trend_gate.schedule_next(key, '发送失败，等待重试')
+    except Exception:
+        logger.exception("告警发送后状态更新失败: %s", key)
+    return response
+
+
+def _process_single_alert_config(data, config_row, alertname, feishu_client, *, mention_oncall=None):
     """
     处理单个告警配置
 
@@ -605,6 +722,11 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client):
             "检测到 phone 级别告警: maid=%s oncall_users=%d",
             maid, len(mentioned_user_list)
         )
+    elif mention_oncall is False:
+        # 趋势试点中，持续轻微越线可以通知群，但无需打扰值班人。
+        mentioned_user_list = []
+    elif mention_oncall is True and config_row.get('oncall_sync'):
+        mentioned_user_list = _get_oncall_mentioned_users(config_row, maid=maid)
     elif severity_matches:
         if config_row.get('oncall_sync'):
             mentioned_user_list = _get_oncall_mentioned_users(config_row, maid=maid)

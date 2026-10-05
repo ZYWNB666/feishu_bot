@@ -41,6 +41,15 @@ class Config:
 
     # ==================== Grafana配置 ====================
     GRAFANA_API_KEY = os.getenv("GRAFANA_API_KEY", "")
+    GRAFANA_RULES_READ_KEY = os.getenv("GRAFANA_RULES_READ_KEY", "")
+    GRAFANA_API_URL = os.getenv("GRAFANA_API_URL", "https://grafana.magikcloud.cn")
+
+    # 指标趋势告警试点。凭据只从运行环境读取，不写入代码或数据库。
+    TREND_GATE_ENABLED = os.getenv("TREND_GATE_ENABLED", "false").lower() == "true"
+    TREND_RULE_UID = os.getenv("TREND_RULE_UID", "tfk3tpot5p0e3f")
+    VM_QUERY_URL = os.getenv("VM_QUERY_URL", "")
+    VM_USER = os.getenv("VM_USER", "")
+    VM_PASSWORD = os.getenv("VM_PASSWORD", "")
 
     # ==================== Flashcat oncall 配置 ====================
     # Flashcat API key，用于查询排班信息
@@ -141,4 +150,3 @@ if __name__ == "__main__":
         print("✅ 配置验证通过")
     except ValueError as e:
         print(f"❌ 配置验证失败:\n{e}")
-

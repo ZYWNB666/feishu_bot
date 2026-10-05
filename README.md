@@ -209,6 +209,26 @@ POST http://localhost:3000/api/card_callback
 
 ## 💡 使用示例
 
+### Kimi-K3 TPOT 趋势告警试点
+
+路由服务可对“糖番茄-Kimi-K3-TPOT_P50超出阈值”规则（UID `tfk3tpot5p0e3f`）
+查询 VictoriaMetrics 的最近 3 分钟数据。轻微越线观察约 90 秒，每 15 秒复查；
+达到触发阈值的 1.5 倍或最近一分钟明显恶化时立即发送。请求量不足、规则或
+指标查询失败时按原流程发送。同一实例的重复投递冷却时间为 5 分钟，明显恶化
+可以提前再次通知；已通知的实例每 30 秒继续复查，恶化达到上次通知值的
+1.25 倍才再次通知。
+
+试点告警将“发群消息”和“@ 值班人”分开判断：达到硬上限、最近一分钟明显恶化，
+或相对上次通知值恶化 25% 的升级提醒会查询当前 oncall 并 @；观察期满后的
+普通越线消息不 @。指标数据不足或查询失败时沿用原有路由 @ 配置；`phone`
+级别保持原有强制 oncall 与电话告警逻辑。该策略只在试点开关打开时生效。
+
+先对现有数据库执行 `migrations/20261005_alert_trend_state.sql`，再设置
+`TREND_GATE_ENABLED=true`、`GRAFANA_RULES_READ_KEY`、`VM_QUERY_URL`、`VM_USER` 和
+`VM_PASSWORD`。各项默认值见 `.env.example`。凭据只放在运行环境或 Kubernetes
+Secret 中。当前复查任务运行在应用进程内，部署应保持单副本。
+
+
 ### Python调用示例
 
 ```python

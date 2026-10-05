@@ -21,6 +21,7 @@ from config import config
 from feishu_utils.feishu_api import FeishuApiClient, FeishuApiException
 from feishu_utils.user_sync import sync_feishu_users
 from feishu_utils.ws_client import start_ws_client_in_thread
+from feishu_utils.trend_worker import start_trend_worker
 
 # 配置日志（统一格式）
 logging.basicConfig(
@@ -140,5 +141,6 @@ if __name__ == "__main__":
 
     # 启动飞书 WebSocket 长连接（守护线程，自动重连）
     start_ws_client_in_thread(config.APP_ID, config.APP_SECRET, feishu_client, debug=config.DEBUG)
+    start_trend_worker(feishu_client)
 
     app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)

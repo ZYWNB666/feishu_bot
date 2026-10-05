@@ -26,6 +26,14 @@ stringData:
   ENCRYPT_KEY: ""
   # Grafana
   GRAFANA_API_KEY: "*"
+  GRAFANA_RULES_READ_KEY: "*"
+  GRAFANA_API_URL: "https://grafana.magikcloud.cn"
+  # 趋势告警试点：执行数据库迁移并填好只读指标凭据后改为 true
+  TREND_GATE_ENABLED: "false"
+  TREND_RULE_UID: "tfk3tpot5p0e3f"
+  VM_QUERY_URL: "https://auth-metrics.magikcloud.cn/select/66/prometheus/api/v1/query_range"
+  VM_USER: "*"
+  VM_PASSWORD: "*"
   # MySQL (外部实例)
   MYSQL_HOST: "10.251.93.216"
   MYSQL_PORT: "3306"
