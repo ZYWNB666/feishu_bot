@@ -56,7 +56,7 @@ def run_pending_once(feishu_client):
             except Exception:
                 logger.exception("更新待观察告警重试时间失败: %s", key)
     # 无新策略时不产生额外群消息，保持旧试点的发送行为。
-    if trend_gate.enabled_policies():
+    if trend_gate.enabled_policies() or trend_gate.global_policy():
         trend_digest.update_digests(feishu_client)
         cleanup_decision_logs()
 
@@ -72,11 +72,12 @@ def _process_pending_row(key, feishu_client):
     with db_cursor(dictionary=True) as (conn, cursor):
         cursor.execute('SELECT * FROM alert_config WHERE id=%s', (current['config_id'],))
         config_row = cursor.fetchone()
-    policy = trend_gate.get_policy(config_row) if config_row else None
     data = json.loads(current['payload']) if isinstance(current['payload'], str) else current['payload']
+    policy = trend_gate.policy_for_route(config_row, data) if config_row else None
     try:
-        if (config_row and config_row.get('trend_policy') is not None
-                and (policy is None or key[0] not in policy.rule_uids)):
+        if (config_row and (config_row.get('trend_policy') is not None
+                            or trend_gate.Config.TREND_GATE_MODE != 'legacy')
+                and policy is None):
             decision = trend_gate.Decision('send', None, '路由趋势策略未启用，按原流程发送')
         else:
             decision = trend_gate.decide(

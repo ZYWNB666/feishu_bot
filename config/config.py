@@ -10,6 +10,8 @@ from dotenv import load_dotenv, find_dotenv
 # 加载环境变量
 load_dotenv(find_dotenv())
 
+from config.constants import TREND_GATE_MODE, TREND_LABEL_MATCHERS
+
 
 class Config:
     """配置类 - 统一管理所有配置项"""
@@ -47,6 +49,8 @@ class Config:
     # 指标趋势告警试点。凭据只从运行环境读取，不写入代码或数据库。
     TREND_GATE_ENABLED = os.getenv("TREND_GATE_ENABLED", "false").lower() == "true"
     TREND_RULE_UID = os.getenv("TREND_RULE_UID", "tfk3tpot5p0e3f")
+    TREND_GATE_MODE = TREND_GATE_MODE
+    TREND_LABEL_MATCHERS = TREND_LABEL_MATCHERS
     VM_QUERY_URL = os.getenv("VM_QUERY_URL", "")
     VM_USER = os.getenv("VM_USER", "")
     VM_PASSWORD = os.getenv("VM_PASSWORD", "")

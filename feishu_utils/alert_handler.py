@@ -575,8 +575,8 @@ def _process_trend_request(data, feishu_client):
     for config_row in configs:
         key = trend_gate.state_key(data, config_row['group_id'])
         try:
-            policy = trend_gate.get_policy(config_row)
-            if ((policy and key[0] in policy.rule_uids)
+            policy = trend_gate.policy_for_route(config_row, data)
+            if (policy
                     or trend_gate.legacy_route_enabled(config_row, data)):
                 with trend_gate.lock_for(key):
                     response = _process_trend_config(data, config_row, alertname, feishu_client, key, policy)
@@ -603,6 +603,8 @@ def _process_trend_request(data, feishu_client):
 
 
 def _process_trend_config(data, config_row, alertname, feishu_client, key, policy=None):
+    if policy and not _is_all_resolved(data) and not trend_gate.can_evaluate(policy, key[0]):
+        return _process_single_alert_config(data, config_row, alertname, feishu_client)
     try:
         state = trend_gate.get_state(key)
     except Exception:

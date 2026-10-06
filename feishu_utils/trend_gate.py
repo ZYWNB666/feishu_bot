@@ -8,6 +8,7 @@ import statistics
 import threading
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -37,6 +38,8 @@ _legacy_warning_emitted = False
 @dataclass(frozen=True)
 class TrendPolicy:
     rule_uids: tuple[str, ...] = ()
+    match_labels: tuple[tuple[str, str], ...] = ()
+    match_all: bool = False
     observe_seconds: int = TREND_OBSERVE_SECONDS
     rise_ratio: float = TREND_RISE_RATIO
     hard_ratio: float = TREND_HARD_RATIO
@@ -59,11 +62,26 @@ def get_policy(config_row):
         if raw.get('enabled', True) is not True:
             raise ValueError('策略未启用')
         uids = raw.get('rule_uids', [])
-        if (not isinstance(uids, list) or not uids
+        if (not isinstance(uids, list)
                 or any(not isinstance(uid, str) or not uid.strip() for uid in uids)):
-            raise ValueError('rule_uids 必须为非空字符串列表')
+            raise ValueError('rule_uids 必须为字符串列表')
+        labels = raw.get('match_labels', {})
+        if (not isinstance(labels, dict) or any(
+                not isinstance(k, str) or not k or not isinstance(v, str)
+                for k, v in labels.items())):
+            raise ValueError('match_labels 必须为标签名到正则字符串的对象')
+        for pattern in labels.values():
+            re.compile(pattern)
+        match_all = raw.get('match_all', False)
+        if type(match_all) is not bool:
+            raise ValueError('match_all 必须为布尔值')
+        if not uids and not labels and not match_all:
+            raise ValueError('须配置 rule_uids、match_labels 或 match_all=true')
         values = {name: raw[name] for name in TrendPolicy.__dataclass_fields__ if name in raw}
         values['rule_uids'] = tuple(dict.fromkeys(uids))
+        values['match_labels'] = tuple(labels.items())
+        if (labels or match_all) and 'request_metric' not in raw:
+            values['request_metric'] = 'auto'
         policy = TrendPolicy(**values)
         for name, minimum in (('observe_seconds', 1), ('min_requests', 0),
                               ('slow_window_seconds', 60), ('confirm_cycles', 1)):
@@ -81,7 +99,7 @@ def get_policy(config_row):
                 or not re.fullmatch(r'[a-zA-Z_:][a-zA-Z0-9_:]*', policy.request_metric)):
             raise ValueError('request_metric 必须为合法的 counter 指标名')
         return policy
-    except (ValueError, TypeError, OverflowError) as error:
+    except (ValueError, TypeError, OverflowError, re.error) as error:
         logger.warning('趋势策略无效，沿用普通路由: config_id=%s reason=%s', config_row.get('id'), error)
         return None
 
@@ -112,7 +130,7 @@ def enabled_policies():
         except Exception:
             # 包括未执行迁移导致的未知列；只在首次回退时提示。
             rows = []
-        if not policies and not _legacy_warning_emitted:
+        if not policies and Config.TREND_GATE_MODE == 'legacy' and not _legacy_warning_emitted:
             logger.warning('趋势策略未配置或无法读取，回退旧环境变量试点（仅提示一次）')
             _legacy_warning_emitted = True
         _policy_cache = policies
@@ -120,13 +138,74 @@ def enabled_policies():
         return dict(policies)
 
 
+@lru_cache(maxsize=8)
+def _global_policy(mode, label_json):
+    """环境配置只解析一次；非法筛选不扩大范围、不影响普通告警。"""
+    if mode == 'legacy':
+        return None
+    if mode == 'all':
+        return get_policy({'trend_policy': {'match_all': True}})
+    if mode == 'labels':
+        try:
+            labels = json.loads(label_json)
+        except (ValueError, TypeError):
+            logger.warning('TREND_LABEL_MATCHERS 不是有效 JSON，沿用普通通知')
+            return None
+        return get_policy({'trend_policy': {'match_labels': labels}})
+    logger.warning('TREND_GATE_MODE 无效，沿用普通通知: mode=%s', mode)
+    return None
+
+
+def global_policy():
+    return _global_policy(Config.TREND_GATE_MODE, Config.TREND_LABEL_MATCHERS)
+
+
+def policy_matches(policy, data):
+    alerts = data.get('alerts') or []
+    if not policy or len(alerts) != 1:
+        return False
+    labels = alerts[0].get('labels') or {}
+    # 明确退出与电话级别始终优先，避免扩大筛选后延迟紧急通知。
+    if (labels.get('severity') == 'phone'
+            or str(labels.get('trend_gate', '')).lower() in ('false', 'off', '0')):
+        return False
+    if policy.rule_uids and rule_uid(data) not in policy.rule_uids:
+        return False
+    if not (policy.rule_uids or policy.match_labels or policy.match_all):
+        return False
+    return all(key in labels and re.fullmatch(pattern, str(labels[key])) is not None
+               for key, pattern in policy.match_labels)
+
+
+def policy_for_route(config_row, data):
+    # 显式路由配置覆盖全局；关闭/无效/未匹配均不回退全局。
+    policy = (get_policy(config_row) if config_row.get('trend_policy') is not None
+              else global_policy())
+    return policy if policy_matches(policy, data) else None
+
+
+def can_evaluate(policy, uid):
+    """自动模式在批次拆分前检查，未适配规则保留原有聚合与去重。"""
+    if policy.request_metric != 'auto':
+        return True
+    try:
+        expression, _, _, direction = _load_rule(uid)
+        _auto_request_metric(expression, direction)
+        return True
+    except Exception as error:
+        logger.info('自动趋势判断不可用，按原流程发送: rule_uid=%s reason=%s', uid, error)
+        return False
+
+
 def trends_enabled():
-    return bool(enabled_policies()) or Config.TREND_GATE_ENABLED
+    return (bool(enabled_policies()) or global_policy() is not None
+            or (Config.TREND_GATE_MODE == 'legacy' and Config.TREND_GATE_ENABLED))
 
 
 def legacy_route_enabled(config_row, data):
     """仅 NULL/未迁移路由允许旧试点回退；非法或显式关闭策略直接放行。"""
-    return (config_row.get('trend_policy') is None and not enabled_policies()
+    return (Config.TREND_GATE_MODE == 'legacy'
+            and config_row.get('trend_policy') is None and not enabled_policies()
             and Config.TREND_GATE_ENABLED and rule_uid(data) == Config.TREND_RULE_UID)
 
 
@@ -177,8 +256,11 @@ def is_enabled_for(data):
     if not uid or not alerts[0].get('fingerprint'):
         return False
     policies = enabled_policies()
-    if policies:
-        enabled = any(uid in policy.rule_uids for policy in policies.values())
+    default = global_policy()
+    if policies or default or Config.TREND_GATE_MODE != 'legacy':
+        candidates = [*policies.values(), default]
+        enabled = any(policy_matches(policy, data) and can_evaluate(policy, uid)
+                      for policy in candidates)
     else:
         enabled = Config.TREND_GATE_ENABLED and uid == Config.TREND_RULE_UID
     if not enabled:
@@ -298,6 +380,26 @@ def _request_count(labels, request_metric=TREND_REQUEST_METRIC):
     return count
 
 
+def _auto_request_metric(expression, direction):
+    """仅识别已适配的推理指标；不根据告警标题猜测计数器。"""
+    expression = re.sub(r'"(?:\\.|[^"\\])*"', '""', expression)
+    expression = re.sub(r'#[^\n]*', '', expression)
+    counters = {
+        'magik_model_tpot_ms_bucket': 'magik_model_tpot_ms_count',
+        'magik_model_ttft_ms_bucket': 'magik_model_ttft_ms_count',
+        'magik_model_response_total': 'magik_model_response_total',
+    }
+    matches = [counter for metric, counter in counters.items()
+               if re.search(r'(?<![\w:])' + metric + r'(?![\w:])', expression)]
+    if len(matches) != 1:
+        raise ValueError('规则不属于可自动识别的 TPOT、TTFT、成功率指标')
+    expected_direction = ('lower_worse' if matches[0] == 'magik_model_response_total'
+                          else 'higher_worse')
+    if direction != expected_direction or (direction == 'lower_worse' and '/' not in expression):
+        raise ValueError('指标表达式或比较方向不适合自动趋势判断')
+    return matches[0]
+
+
 def with_decision_note(data, decision):
     """发送观察后的卡片时标出当前复查值，避免只展示首次 Webhook 的旧数值。"""
     if decision.value is None:
@@ -367,12 +469,14 @@ def decide(data, first_seen, policy=None):
     if not (Config.GRAFANA_RULES_READ_KEY or Config.GRAFANA_API_KEY) or not Config.VM_QUERY_URL:
         raise ValueError('缺少 Grafana 或 VictoriaMetrics 查询配置')
     expression, threshold, recovery_threshold, direction = _load_rule(uid)
+    request_metric = (_auto_request_metric(expression, direction) if policy.request_metric == 'auto'
+                      else policy.request_metric)
     labels = data['alerts'][0].get('labels') or {}
     now = time.time()
     points = _matching_points(
         _vm_query(expression, start=now - max(180, policy.slow_window_seconds + 60), end=now, step=15), labels
     )
-    count = _request_count(labels, policy.request_metric)
+    count = _request_count(labels, request_metric)
     return classify(points, threshold, recovery_threshold, count, first_seen, now=now,
                     policy=policy, direction=direction)
 

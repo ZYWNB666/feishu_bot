@@ -24,6 +24,7 @@ def setUpModule():
     _external_guards = [
         patch('requests.sessions.Session.request', side_effect=AssertionError('测试禁止外部 HTTP')),
         patch('db.pool._build_pool', side_effect=AssertionError('测试禁止真实数据库')),
+        patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'legacy'),
     ]
     for guard in _external_guards:
         guard.start()
@@ -325,6 +326,155 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(send.call_count, 3)
 
 
+class LabelPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.data = {'status': 'firing', 'alerts': [{
+            'status': 'firing', 'fingerprint': 'f',
+            'generatorURL': 'https://g/alerting/grafana/new-rule/view',
+            'labels': {'tenant': 'tenant-a', 'model': 'Kimi-K3',
+                       'alertname': 'Kimi-TPOT', 'severity': 'p0'},
+        }]}
+        trend_gate._global_policy.cache_clear()
+        rule = patch.object(trend_gate, '_load_rule', return_value=(
+            'rate(magik_model_tpot_ms_bucket[1m])', 30, 25, 'higher_worse'))
+        rule.start()
+        self.addCleanup(rule.stop)
+
+    def test_labels_match_all_keys_and_entire_values_without_uids(self):
+        policy = trend_gate.get_policy({'trend_policy': {'match_labels': {
+            'tenant': 'tenant-a', 'alertname': '.*(TPOT|TTFT).*'}}})
+        self.assertEqual(policy.request_metric, 'auto')
+        self.assertTrue(trend_gate.policy_matches(policy, self.data))
+        self.data['alerts'][0]['labels']['tenant'] = 'tenant-ab'
+        self.assertFalse(trend_gate.policy_matches(policy, self.data))
+        del self.data['alerts'][0]['labels']['tenant']
+        self.assertFalse(trend_gate.policy_matches(policy, self.data))
+
+    def test_invalid_filters_do_not_enable_all(self):
+        for raw in ({'match_labels': {}}, {'match_labels': []},
+                    {'match_labels': {'tenant': '['}}, {'match_labels': {'tenant': True}},
+                    {'match_all': 'true'}, {'match_all': False}):
+            with self.subTest(raw=raw):
+                self.assertIsNone(trend_gate.get_policy({'trend_policy': raw}))
+        for label_json in ('{}', '[]', '{', '{"tenant":"["}', '{},"match_all":true'):
+            self.assertIsNone(trend_gate._global_policy('labels', label_json))
+        self.assertIsNone(trend_gate._global_policy('typo', '{}'))
+
+    def test_global_labels_select_new_rules_without_route_policy(self):
+        with patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'labels'), \
+             patch.object(trend_gate.Config, 'TREND_LABEL_MATCHERS', '{"tenant":"tenant-a"}'), \
+             patch.object(trend_gate, 'enabled_policies', return_value={}):
+            self.assertTrue(trend_gate.is_enabled_for(self.data))
+            self.assertTrue(trend_gate.trends_enabled())
+            self.assertIsNotNone(trend_gate.policy_for_route({'trend_policy': None}, self.data))
+            self.data['alerts'][0]['labels']['tenant'] = 'tenant-b'
+            self.assertFalse(trend_gate.is_enabled_for(self.data))
+
+    def test_global_all_respects_route_override_phone_and_opt_out(self):
+        with patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'all'), \
+             patch.object(trend_gate, 'enabled_policies', return_value={}):
+            self.assertTrue(trend_gate.is_enabled_for(self.data))
+            self.assertIsNotNone(trend_gate.policy_for_route({}, self.data))
+            for raw in ({'enabled': False}, '{', {'rule_uids': ['different']}):
+                self.assertIsNone(trend_gate.policy_for_route({'trend_policy': raw}, self.data))
+            override = trend_gate.policy_for_route({'trend_policy': {
+                'match_all': True, 'observe_seconds': 45}}, self.data)
+            self.assertEqual(override.observe_seconds, 45)
+            self.data['alerts'][0]['labels']['severity'] = 'phone'
+            self.assertFalse(trend_gate.is_enabled_for(self.data))
+            self.data['alerts'][0]['labels']['severity'] = 'p0'
+            self.data['alerts'][0]['labels']['trend_gate'] = 'false'
+            self.assertFalse(trend_gate.is_enabled_for(self.data))
+
+    def test_route_labels_override_global_and_legacy_uid_can_intersect_labels(self):
+        raw = {'match_labels': {'model': 'Kimi-.*'}, 'rule_uids': ['new-rule']}
+        with patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'legacy'):
+            policy = trend_gate.policy_for_route({'trend_policy': raw}, self.data)
+            self.assertIsNotNone(policy)
+            self.data['alerts'][0]['generatorURL'] = 'https://g/alerting/grafana/other/view'
+            self.assertIsNone(trend_gate.policy_for_route({'trend_policy': raw}, self.data))
+
+    def test_counter_auto_detection_and_unsupported_rules(self):
+        expressions = [
+            ('histogram_quantile(.5, rate(magik_model_tpot_ms_bucket[1m]))',
+             'higher_worse', 'magik_model_tpot_ms_count'),
+            ('histogram_quantile(.99, rate(magik_model_ttft_ms_bucket[5m])) / 1000',
+             'higher_worse', 'magik_model_ttft_ms_count'),
+            ('sum(rate(magik_model_response_total{code=~"2.."}[5m])) / '
+             'sum(rate(magik_model_response_total[5m])) * 100',
+             'lower_worse', 'magik_model_response_total'),
+        ]
+        for expression, direction, counter in expressions:
+            self.assertEqual(trend_gate._auto_request_metric(expression, direction), counter)
+        for expression, direction in (
+                ('up', 'higher_worse'), ('magik_model_response_total', 'higher_worse'),
+                ('rate(magik_model_response_total[5m])', 'lower_worse'),
+                ('magik_model_tpot_ms_bucket', 'lower_worse'),
+                ('magik_model_tpot_ms_bucket + magik_model_ttft_ms_bucket', 'higher_worse'),
+                ('up # magik_model_tpot_ms_bucket', 'higher_worse'),
+                ('up{model="magik_model_tpot_ms_bucket"}', 'higher_worse')):
+            with self.assertRaises(ValueError):
+                trend_gate._auto_request_metric(expression, direction)
+
+    def test_auto_decide_queries_ttft_counter(self):
+        policy = trend_gate.get_policy({'trend_policy': {'match_all': True}})
+        with patch.object(trend_gate.Config, 'GRAFANA_RULES_READ_KEY', 'test'), \
+             patch.object(trend_gate.Config, 'VM_QUERY_URL', 'http://vm/api/v1/query'), \
+             patch.object(trend_gate, '_load_rule', return_value=(
+                 'rate(magik_model_ttft_ms_bucket[5m])', 4, 4, 'higher_worse')), \
+             patch.object(trend_gate, '_vm_query', return_value=[]), \
+             patch.object(trend_gate, '_matching_points', return_value=[]), \
+             patch.object(trend_gate, '_request_count', return_value=100) as count:
+            decision = trend_gate.decide(self.data, 0, policy)
+        count.assert_called_once_with(self.data['alerts'][0]['labels'], 'magik_model_ttft_ms_count')
+        self.assertEqual(decision.action, 'send')
+
+    def test_unsupported_auto_rule_bypasses_state_and_uses_original_send(self):
+        policy = trend_gate.get_policy({'trend_policy': {'match_all': True}})
+        with patch.object(trend_gate, '_load_rule', return_value=('up', 1, 1, 'lower_worse')), \
+             patch.object(trend_gate, 'get_state') as state, \
+             patch.object(alert_handler, '_process_single_alert_config', return_value={'success': True}) as send:
+            result = alert_handler._process_trend_config(
+                self.data, {'id': 1}, 'test', object(), ('new-rule', 'g', 'f'), policy)
+        self.assertTrue(result['success'])
+        state.assert_not_called()
+        send.assert_called_once()
+
+    def test_unsupported_rules_and_rule_query_failures_keep_original_entry(self):
+        with patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'all'), \
+             patch.object(trend_gate, 'enabled_policies', return_value={}), \
+             patch.object(trend_gate, '_load_rule', return_value=('up', 1, 1, 'lower_worse')) as load:
+            self.assertFalse(trend_gate.is_enabled_for(self.data))
+            load.side_effect = RuntimeError('Grafana unavailable')
+            self.assertFalse(trend_gate.is_enabled_for(self.data))
+
+    def test_global_worker_inherits_policy_and_confirms_recovery(self):
+        row = {'status': 'pending', 'config_id': 1, 'payload': self.data,
+               'first_seen': datetime.now(), 'cancel_streak': 0}
+        with patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'all'), \
+             fake_db(row={'id': 1, 'trend_policy': None}) as pair, \
+             patch.object(trend_worker, 'db_cursor') as db, \
+             patch.object(trend_gate, 'get_state', return_value=row), \
+             patch.object(trend_gate, 'decide', return_value=trend_gate.Decision('cancel', 24, '恢复')) as decide, \
+             patch.object(trend_gate, 'log_decision'), \
+             patch.object(trend_gate, 'schedule_next') as schedule:
+            db.return_value.__enter__.return_value = pair
+            trend_worker._process_pending_row(('new-rule', 'g', 'f'), object())
+        self.assertEqual(decide.call_args.args[2].request_metric, 'auto')
+        schedule.assert_called_once_with(('new-rule', 'g', 'f'), '恢复待确认(1/2)', cancel_streak=1)
+
+    def test_global_worker_refreshes_digest_without_route_policies(self):
+        with patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'all'), \
+             patch.object(trend_gate, 'enabled_policies', return_value={}), \
+             patch.object(trend_gate, 'due_active', return_value=[]), \
+             patch.object(trend_digest, 'update_digests') as digest, \
+             patch.object(trend_worker, 'cleanup_decision_logs') as cleanup:
+            client = object()
+            trend_worker.run_pending_once(client)
+        digest.assert_called_once_with(client)
+        cleanup.assert_called_once()
+
+
 class DirectionTests(unittest.TestCase):
     def points(self, fast, slow=1.0):
         return [(t, fast if t >= 940 else slow) for t in range(340, 1001, 15)]
@@ -420,7 +570,8 @@ class RecoveryConfirmationTests(unittest.TestCase):
         self.key = ('r', 'g', 'f')
         self.row = {'status': 'pending', 'config_id': 1, 'cancel_streak': 0,
                     'first_seen': datetime.now() - timedelta(seconds=100),
-                    'payload': {'alerts': [{'labels': {'alertname': 'test'}}]}}
+                    'payload': {'alerts': [{'generatorURL': 'https://g/alerting/grafana/r/view',
+                                            'labels': {'alertname': 'test'}}]}}
         self.route = {'id': 1, 'group_id': 'g', 'trend_policy': {'rule_uids': ['r'], 'confirm_cycles': 2}}
 
     def test_cancel_streak_survives_checks_then_resolves(self):

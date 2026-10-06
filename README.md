@@ -209,7 +209,77 @@ POST http://localhost:3000/api/card_callback
 
 ## 💡 使用示例
 
-### 趋势告警 V2：按路由配置
+### 趋势告警：按标签或全局启用
+
+部署保持单副本，先依次执行 `migrations/20261005_alert_trend_state.sql` 和
+`migrations/20261006_alert_trend_policy.sql`（已执行过的迁移不要重复执行）。
+配置 Grafana 只读 key 和 `VM_QUERY_URL` 后，推荐通过以下一种方式启用，无需维护规则 UID。
+
+**按现有标签筛选**：在路由服务的环境变量中设置，重启服务生效。例如只接入糖番茄的延迟告警：
+
+```dotenv
+TREND_GATE_MODE=labels
+TREND_LABEL_MATCHERS={"tenant":"tenant-b4n1c8awyyfn5","alertname":".*(TPOT|TTFT).*"}
+```
+
+标签取单条 webhook 告警的 `labels`，标签名精确匹配，值为正则且匹配完整字符串，
+所有条件需同时满足。不要把 Grafana 的 rule group 名直接当作标签，除非 webhook 确实携带。
+也可以给需要启用的 Grafana 规则添加 `trend_gate=true` 标签，使用默认筛选：
+
+```dotenv
+TREND_GATE_MODE=labels
+TREND_LABEL_MATCHERS={"trend_gate":"true"}
+```
+
+**全局自动识别**：只需设置：
+
+```dotenv
+TREND_GATE_MODE=all
+```
+
+两种模式下，路由 `trend_policy=NULL` 均继承全局配置，新建的匹配规则也自动生效。
+阈值、恢复阈值和比较方向继续从 Grafana 读取；请求量计数器根据 PromQL 自动识别：
+
+| 指标表达式 | 请求量计数器 | 支持方向 |
+| --- | --- | --- |
+| `magik_model_tpot_ms_bucket` | `magik_model_tpot_ms_count` | 越高越严重 |
+| `magik_model_ttft_ms_bucket` | `magik_model_ttft_ms_count` | 越高越严重 |
+| 用 `magik_model_response_total` 计算成功比例 | `magik_model_response_total` | 越低越严重 |
+
+自动识别仅支持 threshold 直接引用 PromQL 查询且比较符为 gt/lt 的规则；含中间表达式、
+未知指标、混合多种指标或无法查询规则时，沿用普通通知，不建立趋势去重状态。
+指标仍统一查询 `VM_QUERY_URL`，应指向这些规则实际使用的数据源/租户；不自动跨数据源查询。
+这些模式默认使用 `request_metric=auto`，不使用旧 `TREND_REQUEST_METRIC` 的 TPOT 默认值。
+指标样本不足或请求量计数器缺失时仍直接通知，不会假定问题已恢复。
+
+`severity=phone` 或 `trend_gate=false`（也接受 off/0）的告警跳过新策略，直接走原通知流程。
+全局启用不改变原有群路由、Grafana pending 时间，也不提供跨恢复轮次冷却。
+成功率硬下限默认不启用；如要设置，应确认查询单位一致，或只在相应路由覆盖。
+
+**单条路由可选覆盖**：通过 PUT `/api/alert_rules/<id>` 设置以下任一策略：
+
+```json
+{"trend_policy":{"match_labels":{"alertname":".*TPOT.*"},"observe_seconds":60}}
+```
+
+```json
+{"trend_policy":{"match_all":true,"observe_seconds":90}}
+```
+
+```json
+{"trend_policy":{"enabled":false}}
+```
+
+显式路由策略优先于全局配置；关闭、非法或未匹配时，该路由按原流程发送。
+传 `null` 恢复继承。多个选择条件（UID、标签）同时填写时按 AND 匹配；`match_all` 不取消其他条件。
+标签筛选为空对象、正则非法或模式拼写错误时不扩大到全局。默认 `TREND_GATE_MODE=legacy`
+保持原有按路由 UID/旧环境变量的行为。
+
+标签/全局模式验收：先在测试群验证一条匹配与一条不匹配的告警；匹配者进入观察，
+不匹配者按原流程发送。再确认 phone/false 标签绕过、TTFT/成功率计数器选取正确、
+同一观察卡片原地更新及路由关闭覆盖有效。运行回归测试不访问真实外部服务。
+
+### 可选：兼容按规则 UID 配置
 
 部署保持单副本。先依次执行 `migrations/20261005_alert_trend_state.sql` 和
 `migrations/20261006_alert_trend_policy.sql`，再通过 POST `/api/alert_rules` 或
@@ -231,7 +301,8 @@ PUT `/api/alert_rules/<id>` 设置 `trend_policy`（JSON 对象或对象的 JSON
 }
 ```
 
-必须填写非空的 `rule_uids`；`enabled` 缺省为 true，其他参数默认值见 `.env.example`。
+UID 模式填写非空的 `rule_uids`；也可改用上述 `match_labels` 或 `match_all`。
+`enabled` 缺省为 true，其他参数默认值见 `.env.example`。
 `request_metric` 必须是合法指标名，示例中的中文占位内容需替换。成功率的阈值与
 `hard_floor` 使用原查询单位：0–1 比例可配置 0.95，0–100 百分数应配置 95。
 硬下限缺省不启用。查询指标时按 tenant/model/ep 匹配唯一序列，无法唯一匹配则直接发送。
@@ -258,9 +329,9 @@ HTTP 首次判断 cancel 仍立即结束；sent 状态仍等待 Grafana resolved
 显示，“更新于”记录实际更新时间且不参与 hash。全部结束后原卡片改为
 “当前无观察中的趋势告警”，以后继续复用该消息 ID。卡片发送失败只记录日志。
 
-未执行迁移或没有任何启用策略时，回退 `TREND_GATE_ENABLED` / `TREND_RULE_UID`
+`TREND_GATE_MODE=legacy` 且未执行迁移或没有任何启用策略时，回退 `TREND_GATE_ENABLED` / `TREND_RULE_UID`
 旧试点（默认关闭，默认 UID `tfk3tpot5p0e3f`），回退只警告一次。
-只要存在启用策略，便按每条路由的 UID 列表启用，无需打开旧试点环境开关；
+只要存在启用策略，便按每条路由的 UID/标签选择条件启用，无需打开旧试点环境开关；
 无策略、无匹配 UID 或策略非法的路由直接发送。复用原有单个后台复查线程，
 运行时经 CRUD 新增策略也会自动生效。
 
