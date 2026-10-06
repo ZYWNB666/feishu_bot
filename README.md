@@ -209,24 +209,53 @@ POST http://localhost:3000/api/card_callback
 
 ## 💡 使用示例
 
-### Kimi-K3 TPOT 趋势告警试点
+### 趋势告警 V2：按路由配置
 
-路由服务可对“糖番茄-Kimi-K3-TPOT_P50超出阈值”规则（UID `tfk3tpot5p0e3f`）
-查询 VictoriaMetrics 的最近 3 分钟数据。轻微越线观察约 90 秒，每 15 秒复查；
-达到触发阈值的 1.5 倍或最近一分钟明显恶化时立即发送。请求量不足、规则或
-指标查询失败时按原流程发送。同一实例的重复投递冷却时间为 5 分钟，明显恶化
-可以提前再次通知；已通知的实例每 30 秒继续复查，恶化达到上次通知值的
-1.25 倍才再次通知。
+部署保持单副本。先依次执行 `migrations/20261005_alert_trend_state.sql` 和
+`migrations/20261006_alert_trend_policy.sql`，再通过 POST `/api/alert_rules` 或
+PUT `/api/alert_rules/<id>` 设置 `trend_policy`（JSON 对象或对象的 JSON 字符串，
+传 null 清空）。配置变更会失效策略与路由缓存，缓存 TTL 为 `ALERT_CONFIG_CACHE_TTL`。
 
-试点告警将“发群消息”和“@ 值班人”分开判断：达到硬上限、最近一分钟明显恶化，
-或相对上次通知值恶化 25% 的升级提醒会查询当前 oncall 并 @；观察期满后的
-普通越线消息不 @。指标数据不足或查询失败时沿用原有路由 @ 配置；`phone`
-级别保持原有强制 oncall 与电话告警逻辑。该策略只在试点开关打开时生效。
+```json
+{
+  "trend_policy": {
+    "enabled": true,
+    "rule_uids": ["成功率规则的UID"],
+    "observe_seconds": 90,
+    "hard_floor": 0.95,
+    "request_metric": "业务实际使用的请求counter指标名",
+    "slow_window_seconds": 600,
+    "min_requests": 20,
+    "confirm_cycles": 2
+  }
+}
+```
 
-先对现有数据库执行 `migrations/20261005_alert_trend_state.sql`，再设置
-`TREND_GATE_ENABLED=true`、`GRAFANA_RULES_READ_KEY`、`VM_QUERY_URL`、`VM_USER` 和
-`VM_PASSWORD`。各项默认值见 `.env.example`。凭据只放在运行环境或 Kubernetes
-Secret 中。当前复查任务运行在应用进程内，部署应保持单副本。
+必须填写非空的 `rule_uids`；`enabled` 缺省为 true，其他参数默认值见 `.env.example`。
+`request_metric` 必须是合法指标名，示例中的中文占位内容需替换。成功率的阈值与
+`hard_floor` 使用原查询单位：0–1 比例可配置 0.95，0–100 百分数应配置 95。
+硬下限缺省不启用。查询指标时按 tenant/model/ep 匹配唯一序列，无法唯一匹配则直接发送。
+
+Grafana `gt` 条件表示越高越严重，保留原 TPOT 行为：轻微越线观察 90 秒，
+达到阈值 1.5 倍或最近一分钟明显恶化时立即发送。`lt` 表示越低越严重：
+先检查硬下限，再确认恢复；快窗口（60 秒）和慢窗口（默认 600 秒）的中位数均
+低于或等于触发阈值时立即发送；仅快窗口越线则观察，到期仍越线也发送。
+指标样本不足、规则或指标查询失败时直接发送，沿用原有 @ 配置。
+
+状态按规则 UID、群组、fingerprint 隔离。已通知的同一轮普通重复告警被抑制；
+数值比上次通知恶化 25% 才升级（越高越严重为 >=1.25 倍，越低越严重为 <=0.75 倍）。
+硬阈值、明显恶化和升级通知可 @ 当前值班人；观察到期的普通越线消息不 @。
+恢复后再次越线属于新一轮，当前版本仍不提供跨轮次冷却。
+
+未执行迁移或没有任何启用策略时，回退 `TREND_GATE_ENABLED` / `TREND_RULE_UID`
+旧试点（默认关闭，默认 UID `tfk3tpot5p0e3f`），回退只警告一次。
+只要存在启用策略，便按每条路由的 UID 列表启用，无需打开旧试点环境开关；
+无策略、无匹配 UID 或策略非法的路由直接发送。复用原有单个后台复查线程，
+运行时经 CRUD 新增策略也会自动生效。
+
+查询配置需要 `VM_QUERY_URL`（以 `/api/v1/query` 或 `/api/v1/query_range` 结尾），
+Grafana 使用 `GRAFANA_RULES_READ_KEY` 或现有 `GRAFANA_API_KEY`。
+内网 VM 无认证时省略 `VM_USER` / `VM_PASSWORD`；凭据仅存放在运行环境或 Secret。
 
 
 ### Python调用示例

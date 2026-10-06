@@ -21,6 +21,22 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def setUpModule():
+    # 测试遗漏 mock 时也禁止访问真实 HTTP 和数据库。
+    global _external_guards
+    _external_guards = [
+        patch('requests.sessions.Session.request', side_effect=AssertionError('测试禁止外部 HTTP')),
+        patch('db.pool._build_pool', side_effect=AssertionError('测试禁止真实数据库')),
+    ]
+    for guard in _external_guards:
+        guard.start()
+
+
+def tearDownModule():
+    for guard in reversed(_external_guards):
+        guard.stop()
+
+
 class _FakeCursor:
     def __init__(self, rows=None):
         self.rows = rows or []
@@ -373,6 +389,8 @@ class PhoneAlertFallbackTests(unittest.TestCase):
             patch.object(alert_handler.Config, "FLASHCAT_APP_KEY", "test-app-key"),
             patch.object(alert_handler, "_create_phone_incident") as create_incident,
             patch.object(alert_handler, "update_message_id"),
+            patch.object(alert_handler, "save_card_content"),
+            patch.object(alert_handler, "_get_oncall_mentioned_users", return_value=[]),
         ):
             result = alert_handler._process_single_alert_config(
                 data, config_row, "Upstream5xx", feishu_client

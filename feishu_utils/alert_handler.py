@@ -575,8 +575,13 @@ def _process_trend_request(data, feishu_client):
     for config_row in configs:
         key = trend_gate.state_key(data, config_row['group_id'])
         try:
-            with trend_gate.lock_for(key):
-                response = _process_trend_config(data, config_row, alertname, feishu_client, key)
+            policy = trend_gate.get_policy(config_row)
+            if ((policy and key[0] in policy.rule_uids)
+                    or trend_gate.legacy_route_enabled(config_row, data)):
+                with trend_gate.lock_for(key):
+                    response = _process_trend_config(data, config_row, alertname, feishu_client, key, policy)
+            else:
+                response = _process_single_alert_config(data, config_row, alertname, feishu_client)
         except Exception:
             logger.exception("趋势告警路由处理失败: %s", key)
             response = None
@@ -597,7 +602,7 @@ def _process_trend_request(data, feishu_client):
     }, 500 if failed == total else 200
 
 
-def _process_trend_config(data, config_row, alertname, feishu_client, key):
+def _process_trend_config(data, config_row, alertname, feishu_client, key, policy=None):
     try:
         state = trend_gate.get_state(key)
     except Exception:
@@ -620,7 +625,7 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key):
     first_seen = (state['first_seen'].replace(tzinfo=timezone.utc).timestamp()
                   if state and state['status'] == 'pending' else time.time())
     try:
-        decision = trend_gate.decide(data, first_seen)
+        decision = trend_gate.decide(data, first_seen, policy)
     except Exception:
         logger.exception("指标趋势查询失败，立即发送: rule_uid=%s", key[0])
         decision = trend_gate.Decision('send', None, '指标查询失败，按原流程发送')
@@ -628,8 +633,8 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key):
 
     if state and state['status'] == 'sent':
         prior = state.get('last_value')
-        worsened = (decision.action == 'send' and prior is not None
-                    and decision.value is not None and decision.value >= prior * 1.25)
+        worsened = (decision.action == 'send'
+                    and trend_gate.is_escalation(decision.value, prior, decision.direction))
         if not worsened:
             reason = ('5 分钟内重复投递' if trend_gate.duplicate_sent(state)
                       else '同一轮告警已通知，未明显恶化')

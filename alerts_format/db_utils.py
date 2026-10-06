@@ -66,6 +66,8 @@ def invalidate_alert_config_cache() -> None:
     with _alert_config_cache_lock:
         _alert_config_cache = []
         _alert_config_cache_expire_at = 0.0
+    from feishu_utils.trend_gate import invalidate_policy_cache
+    invalidate_policy_cache()
     logger.info("alert_config 静态缓存已失效")
 
 

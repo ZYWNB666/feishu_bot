@@ -25,8 +25,19 @@ alert_rules_bp = Blueprint("alert_rules", __name__)
 _UPDATABLE_FIELDS = (
     'group_id', 'users', 'alert_id', 'rank', 'alertmanager_url', 'project',
     'remark', 'label_rules', 'template_type', 'silence_type', 'grafana_url',
-    'oncall_sync', 'flashcat_schedule_id',
+    'oncall_sync', 'flashcat_schedule_id', 'trend_policy',
 )
+
+
+def _serialize_trend_policy(value):
+    """NULL 用于关闭路由策略；其他输入必须能解析为 JSON 对象。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        raise ValueError('trend_policy 必须为 JSON 对象或 null')
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
 @alert_rules_bp.route("/api/alert_rules", methods=["GET"])
@@ -58,6 +69,10 @@ def create_alert_rule():
     # 将users和label_rules转换为JSON字符串
     users_json = json.dumps(data['users']) if isinstance(data['users'], list) else data['users']
     label_rules_json = json.dumps(data.get('label_rules')) if data.get('label_rules') else None
+    try:
+        policy_json = _serialize_trend_policy(data['trend_policy']) if 'trend_policy' in data else None
+    except (ValueError, TypeError) as error:
+        return jsonify({"code": 400, "msg": str(error)}), 400
 
     sql = """
         INSERT INTO alert_config
@@ -81,6 +96,11 @@ def create_alert_rule():
         int(data.get('oncall_sync', 0)),
         data.get('flashcat_schedule_id') or None
     )
+    # 未传入新字段时保留旧 INSERT，兼容尚未执行迁移的数据库。
+    if 'trend_policy' in data:
+        sql = sql.replace('flashcat_schedule_id)', 'flashcat_schedule_id, trend_policy)')
+        sql = sql.replace('VALUES (', 'VALUES (%s, ', 1)
+        values = (*values, policy_json)
 
     try:
         with db_cursor() as (conn, cursor):
@@ -107,6 +127,11 @@ def update_alert_rule(rule_id):
     if not data:
         return jsonify({"code": 400, "msg": "请求体不能为空"}), 400
 
+    try:
+        policy_json = _serialize_trend_policy(data['trend_policy']) if 'trend_policy' in data else None
+    except (ValueError, TypeError) as error:
+        return jsonify({"code": 400, "msg": str(error)}), 400
+
     # 构建更新SQL（仅允许白名单字段）
     update_fields = []
     values = []
@@ -126,6 +151,8 @@ def update_alert_rule(rule_id):
             values.append(data.get(field) or None)
         elif field == 'oncall_sync':
             values.append(int(data.get('oncall_sync', 0)))
+        elif field == 'trend_policy':
+            values.append(policy_json)
         else:
             values.append(data[field])
 

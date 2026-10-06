@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS alert_config (
     grafana_url VARCHAR(255) DEFAULT NULL COMMENT 'Grafana地址(静默类型为grafana时使用)',
     oncall_sync TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'oncall同步开关: 0=使用静态users列表, 1=从Flashcat同步当前oncall人员',
     flashcat_schedule_id VARCHAR(64) DEFAULT NULL COMMENT 'Flashcat排班ID（覆盖全局FLASHCAT_SCHEDULE_ID配置）',
+    trend_policy JSON DEFAULT NULL COMMENT '趋势告警策略(JSON)，NULL=该路由不参与趋势门控',
     UNIQUE KEY uq_alert_id (alert_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Prometheus告警配置表';
 

@@ -30,6 +30,11 @@ TREND_OBSERVE_SECONDS = int(os.getenv("TREND_OBSERVE_SECONDS", "90"))
 TREND_HARD_RATIO = float(os.getenv("TREND_HARD_RATIO", "1.5"))
 TREND_RISE_RATIO = float(os.getenv("TREND_RISE_RATIO", "0.15"))
 TREND_MIN_REQUESTS = int(os.getenv("TREND_MIN_REQUESTS", "20"))
+TREND_REQUEST_METRIC = os.getenv("TREND_REQUEST_METRIC", "magik_model_tpot_ms_count")
+TREND_HARD_FLOOR = float(os.environ["TREND_HARD_FLOOR"]) if os.getenv("TREND_HARD_FLOOR") else None
+TREND_SLOW_WINDOW_SECONDS = int(os.getenv("TREND_SLOW_WINDOW_SECONDS", "600"))
+TREND_CONFIRM_CYCLES = int(os.getenv("TREND_CONFIRM_CYCLES", "2"))
+TREND_LOG_RETENTION_DAYS = int(os.getenv("TREND_LOG_RETENTION_DAYS", "90"))
 
 
 # ==================== 飞书事件/回调去重 ====================
