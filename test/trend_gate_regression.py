@@ -266,6 +266,7 @@ class PolicyTests(unittest.TestCase):
                    {'rule_uids': ['a'], 'observe_seconds': '90'},
                    {'rule_uids': ['a'], 'confirm_cycles': 0},
                    {'rule_uids': ['a'], 'rise_ratio': float('nan')},
+                   {'rule_uids': ['a'], 'rise_ratio': 10**400},
                    {'rule_uids': ['a'], 'request_metric': 'bad{selector}'}]
         for raw in invalid:
             with self.subTest(raw=raw):
@@ -362,6 +363,24 @@ class DirectionTests(unittest.TestCase):
         for points in ([], [(1000, 31)], [(t-100, v) for t,v in self.points(31,31)]):
             d = trend_gate.classify(points, 30, 25, 100, 990, now=1000)
             self.assertEqual(d.reason, '指标样本不足，按原流程发送')
+
+    def test_policy_overrides_and_all_three_higher_worse_rise_checks(self):
+        policy = trend_gate.TrendPolicy(hard_ratio=2, rise_ratio=.01, observe_seconds=120)
+        # 已越阈值且增长比率足够，但绝对增幅不足阈值的 5%，仍观察。
+        points = self.points(30.1, 29.7)
+        decision = trend_gate.classify(points, 30, 25, 100, 900, now=1000, policy=policy)
+        self.assertEqual(decision.action, 'observe')
+        # 增长显著，但当前中位数未到阈值，也不提前发送。
+        decision = trend_gate.classify(self.points(29, 20), 30, 25, 100, 990, now=1000)
+        self.assertEqual(decision.action, 'observe')
+        custom = trend_gate.classify(self.points(50, 50), 30, 25, 100, 990, now=1000, policy=policy)
+        self.assertEqual(custom.action, 'observe')
+        self.assertEqual(trend_gate.classify(self.points(50, 50), 30, 25, 100, 990, now=1000).action, 'send')
+
+    def test_lower_incomplete_slow_window_fails_open(self):
+        d = trend_gate.classify(self.points(.98)[-10:], .99, .995, 100, 990,
+                                now=1000, direction='lower_worse')
+        self.assertEqual(d.reason, '指标样本不足，按原流程发送')
 
     def test_directional_escalation_and_alleviation(self):
         for direction, prior, boundary, relieved in (('higher_worse', 32, 40, 39.9),
@@ -567,15 +586,79 @@ class DigestTests(unittest.TestCase):
         with patch.object(trend_gate, 'trends_enabled', return_value=True), \
              patch.object(trend_gate, 'enabled_policies', return_value={1: trend_gate.TrendPolicy()}), \
              patch.object(trend_gate, 'due_active', return_value=[]), \
+             patch.object(trend_worker, 'cleanup_decision_logs'), \
              patch.object(trend_digest, 'update_digests') as update:
             trend_worker.run_pending_once(object())
             update.assert_called_once()
         with patch.object(trend_gate, 'trends_enabled', return_value=True), \
              patch.object(trend_gate, 'enabled_policies', return_value={}), \
              patch.object(trend_gate, 'due_active', return_value=[]), \
+             patch.object(trend_worker, 'cleanup_decision_logs') as cleanup, \
              patch.object(trend_digest, 'update_digests') as update:
             trend_worker.run_pending_once(object())
             update.assert_not_called()
+            cleanup.assert_not_called()
+
+
+class LogCleanupTests(unittest.TestCase):
+    def test_cleanup_is_hourly_and_uses_configured_retention(self):
+        with fake_db() as pair, patch.object(trend_worker, 'db_cursor') as db, \
+             patch.object(trend_worker, '_last_log_cleanup_at', None), \
+             patch.object(trend_worker, 'TREND_LOG_RETENTION_DAYS', 90), \
+             patch.object(trend_worker, 'TREND_LOG_CLEANUP_SECONDS', 3600), \
+             patch.object(trend_worker.time, 'monotonic', side_effect=[0, 3599, 3600]):
+            db.return_value.__enter__.return_value = pair
+            for _ in range(3):
+                trend_worker.cleanup_decision_logs()
+            self.assertEqual(db.call_count, 2)
+            sql, params = pair[1].execute.call_args.args
+            self.assertIn('created_at < UTC_TIMESTAMP() - INTERVAL %s DAY', sql)
+            self.assertEqual(params, (90,))
+            self.assertEqual(pair[0].commit.call_count, 2)
+
+    def test_failed_cleanup_does_not_raise_or_retry_every_poll(self):
+        with patch.object(trend_worker, '_last_log_cleanup_at', None), \
+             patch.object(trend_worker, 'db_cursor', side_effect=RuntimeError('db error')) as db, \
+             patch.object(trend_worker.time, 'monotonic', side_effect=[10, 25]):
+            trend_worker.cleanup_decision_logs()
+            trend_worker.cleanup_decision_logs()
+            db.assert_called_once()
+
+    def test_bad_retention_cannot_delete_all_logs(self):
+        with patch.object(trend_worker, '_last_log_cleanup_at', None), \
+             patch.object(trend_worker, 'TREND_LOG_RETENTION_DAYS', 0), \
+             patch.object(trend_worker, 'db_cursor') as db:
+            trend_worker.cleanup_decision_logs()
+            db.assert_not_called()
+
+
+class TrendFailureTests(unittest.TestCase):
+    def test_http_metric_query_failure_still_sends(self):
+        key = ('r', 'g', 'f')
+        data = {'status': 'firing', 'alerts': [{'status': 'firing'}]}
+        with patch.object(trend_gate, 'get_state', return_value=None), \
+             patch.object(trend_gate, 'decide', side_effect=RuntimeError('VM unavailable')), \
+             patch.object(trend_gate, 'log_decision'), patch.object(trend_gate, 'save_pending'), \
+             patch.object(trend_gate, 'mark_sent'), \
+             patch.object(alert_handler, '_process_single_alert_config', return_value={'message_id': 'm'}) as send:
+            alert_handler._process_trend_config(data, {'id': 1, 'group_id': 'g'}, 'a', object(), key,
+                                                trend_gate.TrendPolicy(rule_uids=('r',)))
+        send.assert_called_once()
+        self.assertIsNone(send.call_args.kwargs['mention_oncall'])
+
+    def test_worker_exception_does_not_block_other_instances_or_digest(self):
+        rows = [{'rule_uid': 'r', 'group_id': 'g', 'fingerprint': fp} for fp in ('a', 'b')]
+        with patch.object(trend_gate, 'trends_enabled', return_value=True), \
+             patch.object(trend_gate, 'due_active', return_value=rows), \
+             patch.object(trend_gate, 'enabled_policies', return_value={1: trend_gate.TrendPolicy()}), \
+             patch.object(trend_worker, '_process_pending_row', side_effect=[RuntimeError('one failed'), None]) as process, \
+             patch.object(trend_gate, 'schedule_next'), \
+             patch.object(trend_digest, 'update_digests') as digest, \
+             patch.object(trend_worker, 'cleanup_decision_logs') as cleanup:
+            trend_worker.run_pending_once(object())
+        self.assertEqual(process.call_count, 2)
+        digest.assert_called_once()
+        cleanup.assert_called_once()
 
 
 class PolicyApiTests(unittest.TestCase):

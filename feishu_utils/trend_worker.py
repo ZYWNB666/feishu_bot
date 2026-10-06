@@ -6,11 +6,39 @@ import threading
 import time
 from datetime import timezone
 
-from config.constants import TREND_CHECK_SECONDS, TREND_SENT_CHECK_SECONDS
+from config.constants import (
+    TREND_CHECK_SECONDS, TREND_SENT_CHECK_SECONDS,
+    TREND_LOG_RETENTION_DAYS, TREND_LOG_CLEANUP_SECONDS,
+)
 from db.pool import db_cursor
 from feishu_utils import trend_gate, trend_digest
 
 logger = logging.getLogger(__name__)
+_last_log_cleanup_at = None
+
+
+def cleanup_decision_logs():
+    """复用复查线程每小时清理一次；失败也限频，避免每轮重试拖慢告警。"""
+    global _last_log_cleanup_at
+    now = time.monotonic()
+    if _last_log_cleanup_at is not None and now - _last_log_cleanup_at < TREND_LOG_CLEANUP_SECONDS:
+        return
+    _last_log_cleanup_at = now
+    if TREND_LOG_RETENTION_DAYS < 1:
+        logger.error('趋势日志保留天数无效，跳过清理: days=%s', TREND_LOG_RETENTION_DAYS)
+        return
+    try:
+        with db_cursor() as (conn, cursor):
+            cursor.execute(
+                'DELETE FROM alert_trend_decision_log '
+                'WHERE created_at < UTC_TIMESTAMP() - INTERVAL %s DAY',
+                (TREND_LOG_RETENTION_DAYS,),
+            )
+            conn.commit()
+            logger.info('趋势决策日志清理完成: retention_days=%s rows=%s',
+                        TREND_LOG_RETENTION_DAYS, cursor.rowcount)
+    except Exception:
+        logger.exception('趋势决策日志清理失败')
 
 
 def run_pending_once(feishu_client):
@@ -30,6 +58,7 @@ def run_pending_once(feishu_client):
     # 无新策略时不产生额外群消息，保持旧试点的发送行为。
     if trend_gate.enabled_policies():
         trend_digest.update_digests(feishu_client)
+        cleanup_decision_logs()
 
 
 def _process_pending_row(key, feishu_client):

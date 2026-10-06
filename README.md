@@ -268,6 +268,42 @@ HTTP 首次判断 cancel 仍立即结束；sent 状态仍等待 Grafana resolved
 Grafana 使用 `GRAFANA_RULES_READ_KEY` 或现有 `GRAFANA_API_KEY`。
 内网 VM 无认证时省略 `VM_USER` / `VM_PASSWORD`；凭据仅存放在运行环境或 Secret。
 
+启用新策略后，复查线程每小时清理超过 `TREND_LOG_RETENTION_DAYS`（默认 90 天）的
+决策日志；清理失败只记日志，下一周期重试。`scripts/trend_review.sql` 提供抑制错误率、
+骚扰信号、电话认领比例三项只读查询，使用 MySQL 5.7 兼容写法。
+这些是近似指标：cancel 包含未确认恢复，send 不代表实际已发送，数据库没有静默
+操作时间，电话认领只通过持久化卡片回执判断。各项偏差写在 SQL 注释中。
+
+#### 手工验收清单（在测试群和隔离环境执行）
+
+1. 使用已有表的测试库依次执行两份迁移（ALTER 只执行一次）；全新库直接用 `init.sql`。
+   确认 `alert_config.trend_policy`、`alert_trend_state.cancel_streak` 和
+   `alert_trend_digest` 已存在，部署为单副本。
+2. 配置查询地址与只读 Grafana Key。通过 PUT `/api/alert_rules/<路由ID>` 写入上面的
+   `trend_policy`，将 UID 与 counter 名替换为实际成功率规则/指标；用 GET 验证保存结果。
+   用非法 JSON、数组分别请求 POST/PUT 应返回 400，NULL 则清空策略。
+3. 向 POST `/api/v1/alerts` 提交匹配该路由的 Grafana webhook：`status=firing`，
+   单条 alert 带真实的 tenant/model/ep、稳定 fingerprint，`generatorURL` 为
+   `https://<grafana>/alerting/grafana/<UID>/view`。用另一条未配置策略的匹配路由
+   验证其直接发送。以下时间序列需由测试指标源提供，不能只改 webhook 上的数值。
+4. 成功率阈值 0.99、恢复值 0.995、硬下限 0.95；请求量 >=20，慢窗口为 1.0、
+   最近 60 秒为 0.98 时应观察。一次提交同群两个实例，确认只有一张无 @ 的观察卡片，
+   包含两个实例，`alert_trend_digest.message_id` 后续不变；正文不变时无 PATCH。
+5. 最近值回升至 0.996，第一次 worker cancel 后仍 pending，日志原因为
+   `恢复待确认(1/2)`，streak=1；第二次连续 cancel 后 resolved 且 streak=0。
+   两次 cancel 之间再 observe 应清零；HTTP 首次 cancel 仍立即 resolved。
+   全部实例退出 pending 后，原卡片显示“当前无观察中的趋势告警”。
+6. 快慢窗口都为 0.98 或最新值 <=0.95 时应发送并按路由 @ 值班人；仅快窗口越线
+   持续到观察期限应发送但不 @。验证 sent 实例以 <=上次通知值*0.75 的方向升级，
+   其 resolved webhook 正常收敛。验证 TPOT 默认 30/25 阈值及 45 硬上限行为不变。
+7. SELECT 检查 `alert_trend_decision_log` 的 action/value/reason 与上述步骤一致；
+   测试库准备超过保留期的日志，等待清理周期，确认旧日志清除、新日志保留。
+   在 UTC 会话执行 `scripts/trend_review.sql`。Grafana/VM/卡片更新失败应有日志，
+   查询失败的待通知实例仍发送，其他实例继续复查。
+8. 用隔离旧表结构或 mock 验证未迁移/策略全空时回退旧环境变量试点，只提示一次；
+   不出现新汇总卡片或恢复防抖。自动测试命令为
+   `python test/trend_gate_regression.py` 和 `python test/regression_test.py`。
+
 
 ### Python调用示例
 

@@ -81,7 +81,7 @@ def get_policy(config_row):
                 or not re.fullmatch(r'[a-zA-Z_:][a-zA-Z0-9_:]*', policy.request_metric)):
             raise ValueError('request_metric 必须为合法的 counter 指标名')
         return policy
-    except (ValueError, TypeError) as error:
+    except (ValueError, TypeError, OverflowError) as error:
         logger.warning('趋势策略无效，沿用普通路由: config_id=%s reason=%s', config_row.get('id'), error)
         return None
 

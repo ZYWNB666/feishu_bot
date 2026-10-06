@@ -35,6 +35,7 @@ TREND_HARD_FLOOR = float(os.environ["TREND_HARD_FLOOR"]) if os.getenv("TREND_HAR
 TREND_SLOW_WINDOW_SECONDS = int(os.getenv("TREND_SLOW_WINDOW_SECONDS", "600"))
 TREND_CONFIRM_CYCLES = int(os.getenv("TREND_CONFIRM_CYCLES", "2"))
 TREND_LOG_RETENTION_DAYS = int(os.getenv("TREND_LOG_RETENTION_DAYS", "90"))
+TREND_LOG_CLEANUP_SECONDS = int(os.getenv("TREND_LOG_CLEANUP_SECONDS", "3600"))
 
 
 # ==================== 飞书事件/回调去重 ====================
