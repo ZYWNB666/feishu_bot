@@ -33,6 +33,7 @@ _policy_cache_lock = threading.Lock()
 _policy_cache = {}
 _policy_cache_expire_at = 0.0
 _legacy_warning_emitted = False
+_legacy_override_warning_emitted = False
 
 
 @dataclass(frozen=True)
@@ -111,12 +112,24 @@ def invalidate_policy_cache():
         _policy_cache_expire_at = 0.0
 
 
+def _warn_legacy_override(policies):
+    global _legacy_override_warning_emitted
+    if (Config.TREND_GATE_ENABLED and (Config.TREND_GATE_MODE != 'legacy' or policies)
+            and not _legacy_override_warning_emitted):
+        logger.warning(
+            '旧 TREND_GATE_ENABLED/TREND_RULE_UID 不再决定启用范围；'
+            '当前按新模式或路由策略匹配，请确认旧试点仍被选中: mode=%s legacy_uid=%s',
+            Config.TREND_GATE_MODE, Config.TREND_RULE_UID)
+        _legacy_override_warning_emitted = True
+
+
 def enabled_policies():
     """缓存所有启用策略；空结果和迁移缺失也缓存，避免高频重复查询。"""
     global _policy_cache, _policy_cache_expire_at, _legacy_warning_emitted
     now = time.monotonic()
     with _policy_cache_lock:
         if now < _policy_cache_expire_at:
+            _warn_legacy_override(_policy_cache)
             return dict(_policy_cache)
         policies = {}
         try:
@@ -135,6 +148,7 @@ def enabled_policies():
             _legacy_warning_emitted = True
         _policy_cache = policies
         _policy_cache_expire_at = now + ALERT_CONFIG_CACHE_TTL
+        _warn_legacy_override(policies)
         return dict(policies)
 
 

@@ -238,12 +238,95 @@ class TrendRoutingTests(unittest.TestCase):
         mark.assert_called_once_with(self.key, 42.0, '最近一分钟明显恶化')
 
 
+class MixedRouteDedupTests(unittest.TestCase):
+    def setUp(self):
+        from utils.bounded_cache import BoundedTTLCache
+        self.data = {'status': 'firing', 'alerts': [{
+            'status': 'firing', 'fingerprint': 'fp1',
+            'generatorURL': 'https://g/alerting/grafana/a/view',
+            'labels': {'alertname': 'TPOT'},
+        }]}
+        self.routes = [
+            {'id': 1, 'group_id': 'gated', 'trend_policy': {'rule_uids': ['a']}},
+            {'id': 2, 'group_id': 'disabled', 'trend_policy': {'enabled': False}},
+            {'id': 3, 'group_id': 'unmatched', 'trend_policy': {'rule_uids': ['b']}},
+        ]
+        for guard in (
+                patch.object(alert_handler, '_alert_label_dedup_cache', BoundedTTLCache(maxsize=50, ttl=300)),
+                patch.object(alert_handler, '_find_alert_configs', return_value=self.routes),
+                patch.object(trend_gate, 'legacy_route_enabled', return_value=False)):
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    def test_repeat_or_changed_fingerprint_dedups_only_normal_routes(self):
+        with patch.object(alert_handler, '_process_trend_config', return_value={'success': True}) as gate, \
+             patch.object(alert_handler, '_process_single_alert_config', return_value={'success': True}) as send:
+            for fingerprint in ('fp1', 'fp1', 'fp2'):
+                self.data['alerts'][0]['fingerprint'] = fingerprint
+                result, status = alert_handler._process_trend_request(self.data, object())
+                self.assertEqual(status, 200)
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual(gate.call_count, 3)
+            self.assertEqual(result['summary']['failed'], 0)
+
+    def test_resolved_clears_cooldown_and_next_firing_sends(self):
+        with patch.object(alert_handler, '_process_trend_config', return_value={'success': True}), \
+             patch.object(alert_handler, '_process_single_alert_config', return_value={'success': True}) as send:
+            for status in ('firing', 'firing', 'resolved', 'firing'):
+                self.data['status'] = status
+                self.data['alerts'][0]['status'] = status
+                alert_handler._process_trend_request(self.data, object())
+            self.assertEqual(send.call_count, 6)
+
+    def test_cooldown_expires_after_five_minutes(self):
+        with patch.object(alert_handler, '_process_trend_config', return_value={'success': True}), \
+             patch.object(alert_handler, '_process_single_alert_config', return_value={'success': True}) as send, \
+             patch('utils.bounded_cache.time.time', return_value=1000) as clock:
+            alert_handler._process_trend_request(self.data, object())
+            clock.return_value = 1299
+            alert_handler._process_trend_request(self.data, object())
+            self.assertEqual(send.call_count, 2)
+            clock.return_value = 1300
+            alert_handler._process_trend_request(self.data, object())
+            self.assertEqual(send.call_count, 4)
+
+    def test_failed_normal_route_retries_while_successful_route_stays_deduped(self):
+        for failure in (None, {'success': False}, RuntimeError('send failed')):
+            with self.subTest(failure=failure), \
+                 patch.object(alert_handler, '_process_trend_config', return_value={'success': True}), \
+                 patch.object(alert_handler, '_process_single_alert_config', side_effect=[
+                     failure, {'success': True}, {'success': True}]) as send:
+                alert_handler._alert_label_dedup_cache.clear()
+                first, _ = alert_handler._process_trend_request(self.data, object())
+                self.assertEqual(first['summary']['failed'], 1)
+                second, status = alert_handler._process_trend_request(self.data, object())
+                self.assertEqual(status, 200)
+                self.assertEqual(second['summary']['failed'], 0)
+                self.assertEqual([c.args[1]['group_id'] for c in send.call_args_list],
+                                 ['disabled', 'unmatched', 'disabled'])
+
+
 class PolicyTests(unittest.TestCase):
     def setUp(self):
         trend_gate.invalidate_policy_cache()
 
     def tearDown(self):
         trend_gate.invalidate_policy_cache()
+
+    def test_legacy_override_warns_once_for_mode_or_route_policy(self):
+        for mode, rows in [('labels', []), ('legacy', [{'id': 1, 'trend_policy': {'rule_uids': ['new']}}])]:
+            trend_gate.invalidate_policy_cache()
+            with self.subTest(mode=mode), fake_db(rows=rows) as pair, \
+                 patch.object(trend_gate.Config, 'TREND_GATE_ENABLED', True), \
+                 patch.object(trend_gate.Config, 'TREND_GATE_MODE', mode), \
+                 patch.object(trend_gate, '_legacy_override_warning_emitted', False), \
+                 patch.object(trend_gate, 'db_cursor') as db, \
+                 patch.object(trend_gate, 'logger') as logger:
+                db.return_value.__enter__.return_value = pair
+                trend_gate.enabled_policies()
+                trend_gate.enabled_policies()
+                logger.warning.assert_called_once()
+                self.assertIn('不再决定启用范围', logger.warning.call_args.args[0])
 
     def test_full_policy_and_defaults_are_frozen(self):
         raw = {'enabled': True, 'rule_uids': ['a', 'b'], 'observe_seconds': 120,

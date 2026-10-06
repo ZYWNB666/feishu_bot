@@ -563,6 +563,27 @@ def _find_alert_configs(data):
     return configs
 
 
+def _process_normal_trend_route(data, config_row, alertname, feishu_client):
+    """趋势入口的普通路由保留同群同名冷却；失败撤销标记，恢复清除冷却。"""
+    group_id = config_row.get('group_id', '')
+    label_key = _make_label_dedup_key(data, group_id)
+    resolved = _is_all_resolved(data)
+    if resolved:
+        _evict_dedup(label_key, cache=_alert_label_dedup_cache, lock=_alert_label_dedup_lock)
+    elif _is_duplicate(label_key, cache=_alert_label_dedup_cache,
+                       lock=_alert_label_dedup_lock, ttl=ALERT_LABEL_DEDUP_TTL):
+        logger.info("趋势入口普通路由语义重复，跳过: alertname=%s group_id=%s", alertname, group_id)
+        return {'group_id': group_id, 'success': True, 'skipped': True,
+                'reason': '同群同名告警冷却中'}
+    response = None
+    try:
+        response = _process_single_alert_config(data, config_row, alertname, feishu_client)
+        return response
+    finally:
+        if not resolved and (not response or not response.get('success')):
+            _evict_dedup(label_key, cache=_alert_label_dedup_cache, lock=_alert_label_dedup_lock)
+
+
 def _process_trend_request(data, feishu_client):
     """试点规则的逐路由决策；观察中的告警不进入旧的内存去重缓存。"""
     configs = _find_alert_configs(data)
@@ -581,7 +602,7 @@ def _process_trend_request(data, feishu_client):
                 with trend_gate.lock_for(key):
                     response = _process_trend_config(data, config_row, alertname, feishu_client, key, policy)
             else:
-                response = _process_single_alert_config(data, config_row, alertname, feishu_client)
+                response = _process_normal_trend_route(data, config_row, alertname, feishu_client)
         except Exception:
             logger.exception("趋势告警路由处理失败: %s", key)
             response = None
@@ -604,12 +625,12 @@ def _process_trend_request(data, feishu_client):
 
 def _process_trend_config(data, config_row, alertname, feishu_client, key, policy=None):
     if policy and not _is_all_resolved(data) and not trend_gate.can_evaluate(policy, key[0]):
-        return _process_single_alert_config(data, config_row, alertname, feishu_client)
+        return _process_normal_trend_route(data, config_row, alertname, feishu_client)
     try:
         state = trend_gate.get_state(key)
     except Exception:
         logger.exception("趋势状态读取失败，按原流程发送: %s", key)
-        return _process_single_alert_config(data, config_row, alertname, feishu_client)
+        return _process_normal_trend_route(data, config_row, alertname, feishu_client)
 
     if _is_all_resolved(data):
         if state and state['status'] in ('pending', 'resolved') and not state.get('last_sent_at'):
@@ -649,7 +670,7 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
             trend_gate.mark_resolved(key, decision.reason)
         except Exception:
             logger.exception("恢复状态写入失败，按原流程发送: %s", key)
-            return _process_single_alert_config(data, config_row, alertname, feishu_client)
+            return _process_normal_trend_route(data, config_row, alertname, feishu_client)
         return {'group_id': key[1], 'success': True, 'skipped': True,
                 'reason': decision.reason}
 
@@ -657,7 +678,7 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
         trend_gate.save_pending(key, config_row['id'], data, first_seen, decision.reason)
     except Exception:
         logger.exception("趋势状态写入失败，按原流程发送: %s", key)
-        return _process_single_alert_config(data, config_row, alertname, feishu_client)
+        return _process_normal_trend_route(data, config_row, alertname, feishu_client)
 
     if decision.action == 'observe':
         return {'group_id': key[1], 'success': True, 'skipped': True,
