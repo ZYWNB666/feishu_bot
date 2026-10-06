@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS alert_trend_state (
     last_sent_at DATETIME(6) DEFAULT NULL,
     `last_value` DOUBLE DEFAULT NULL,
     reason VARCHAR(255) DEFAULT NULL,
+    cancel_streak INT NOT NULL DEFAULT 0 COMMENT '连续 cancel 计数，用于恢复防抖',
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (rule_uid, group_id, fingerprint),
     KEY idx_trend_due (status, next_check)

@@ -396,6 +396,97 @@ class DirectionTests(unittest.TestCase):
         count.assert_called_once_with({'model': 'm'}, 'requests_total')
 
 
+class RecoveryConfirmationTests(unittest.TestCase):
+    def setUp(self):
+        self.key = ('r', 'g', 'f')
+        self.row = {'status': 'pending', 'config_id': 1, 'cancel_streak': 0,
+                    'first_seen': datetime.now() - timedelta(seconds=100),
+                    'payload': {'alerts': [{'labels': {'alertname': 'test'}}]}}
+        self.route = {'id': 1, 'group_id': 'g', 'trend_policy': {'rule_uids': ['r'], 'confirm_cycles': 2}}
+
+    def test_cancel_streak_survives_checks_then_resolves(self):
+        def schedule(key, reason, **kwargs):
+            self.row['cancel_streak'] = kwargs.get('cancel_streak', 0)
+        with fake_db(row=self.route) as pair, \
+             patch.object(trend_worker, 'db_cursor') as db, \
+             patch.object(trend_gate, 'get_state', side_effect=lambda key: dict(self.row)), \
+             patch.object(trend_gate, 'decide', return_value=trend_gate.Decision('cancel', 24, '恢复')), \
+             patch.object(trend_gate, 'log_decision'), \
+             patch.object(trend_gate, 'schedule_next', side_effect=schedule) as retry, \
+             patch.object(trend_gate, 'mark_resolved') as resolved:
+            db.return_value.__enter__.return_value = pair
+            trend_worker._process_pending_row(self.key, object())
+            retry.assert_called_once_with(self.key, '恢复待确认(1/2)', cancel_streak=1)
+            resolved.assert_not_called()
+            trend_worker._process_pending_row(self.key, object())
+            resolved.assert_called_once_with(self.key, '恢复')
+
+    def test_observe_breaks_consecutive_recovery(self):
+        def schedule(key, reason, **kwargs):
+            self.row['cancel_streak'] = kwargs.get('cancel_streak', 0)
+        with fake_db(row=self.route) as pair, \
+             patch.object(trend_worker, 'db_cursor') as db, \
+             patch.object(trend_gate, 'get_state', side_effect=lambda key: dict(self.row)), \
+             patch.object(trend_gate, 'decide', side_effect=[
+                 trend_gate.Decision('cancel', 24, '恢复'), trend_gate.Decision('observe', 31, '观察'),
+                 trend_gate.Decision('cancel', 24, '恢复')]), \
+             patch.object(trend_gate, 'log_decision'), \
+             patch.object(trend_gate, 'schedule_next', side_effect=schedule), \
+             patch.object(trend_gate, 'mark_resolved') as resolved:
+            db.return_value.__enter__.return_value = pair
+            for _ in range(3):
+                trend_worker._process_pending_row(self.key, object())
+            self.assertEqual(self.row['cancel_streak'], 1)
+            resolved.assert_not_called()
+
+    def test_legacy_policy_cancels_immediately(self):
+        with fake_db(row={'id': 1}) as pair, patch.object(trend_worker, 'db_cursor') as db, \
+             patch.object(trend_gate, 'get_state', return_value=self.row), \
+             patch.object(trend_gate, 'decide', return_value=trend_gate.Decision('cancel', 24, '恢复')), \
+             patch.object(trend_gate, 'log_decision'), patch.object(trend_gate, 'mark_resolved') as resolved:
+            db.return_value.__enter__.return_value = pair
+            trend_worker._process_pending_row(self.key, object())
+        resolved.assert_called_once_with(self.key, '恢复')
+
+    def test_state_transitions_reset_streak_and_old_schema_retries_original_sql(self):
+        from mysql.connector import Error
+        transitions = [lambda: trend_gate.save_pending(self.key, 1, {}, 1000, '观察'),
+                       lambda: trend_gate.mark_sent(self.key, 32, '发送'),
+                       lambda: trend_gate.mark_resolved(self.key, '恢复'),
+                       lambda: trend_gate.restore_sent(self.key, '缓解'),
+                       lambda: trend_gate.schedule_next(self.key, '继续')]
+        for transition in transitions:
+            with self.subTest(transition=transition), fake_db() as pair, \
+                 patch.object(trend_gate, 'db_cursor') as db:
+                db.return_value.__enter__.return_value = pair
+                pair[1].execute.side_effect = [Error('Unknown column cancel_streak', errno=1054), None]
+                transition()
+                calls = pair[1].execute.call_args_list
+                self.assertIn('cancel_streak=0', calls[0].args[0])
+                self.assertNotIn('cancel_streak', calls[1].args[0])
+                pair[0].commit.assert_called_once()
+
+    def test_lower_worse_worker_restores_or_escalates_in_correct_direction(self):
+        self.row.update(last_sent_at=datetime.now(), last_value=1.0, cancel_streak=1)
+        with fake_db(row=self.route) as pair, patch.object(trend_worker, 'db_cursor') as db, \
+             patch.object(trend_gate, 'get_state', return_value=self.row), \
+             patch.object(trend_gate, 'decide', side_effect=[
+                 trend_gate.Decision('send', .8, '下限', True, 'lower_worse'),
+                 trend_gate.Decision('send', .7, '下限', True, 'lower_worse')]), \
+             patch.object(trend_gate, 'log_decision'), \
+             patch.object(trend_gate, 'restore_sent') as restore, \
+             patch.object(trend_gate, 'mark_sent') as mark, \
+             patch.object(alert_handler, '_process_single_alert_config', return_value={'message_id': 'm'}) as send:
+            db.return_value.__enter__.return_value = pair
+            trend_worker._process_pending_row(self.key, object())
+            restore.assert_called_once()
+            send.assert_not_called()
+            self.row['status'] = 'sent'
+            trend_worker._process_pending_row(self.key, object())
+            send.assert_called_once()
+            mark.assert_called_once_with(self.key, .7, '下限')
+
+
 class PolicyApiTests(unittest.TestCase):
     def test_crud_accepts_objects_and_rejects_invalid_json_without_db(self):
         from flask import Flask

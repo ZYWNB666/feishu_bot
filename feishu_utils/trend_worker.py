@@ -84,7 +84,13 @@ def _process_pending_row(key, feishu_client):
         return
 
     if decision.action == 'cancel':
-        trend_gate.mark_resolved(key, decision.reason)
+        # NULL 策略仍执行旧试点的立即取消行为；新策略才启用连续确认。
+        streak = current.get('cancel_streak', 0) + 1
+        if policy is None or streak >= policy.confirm_cycles:
+            trend_gate.mark_resolved(key, decision.reason)
+        else:
+            trend_gate.schedule_next(
+                key, f'恢复待确认({streak}/{policy.confirm_cycles})', cancel_streak=streak)
         return
     if decision.action == 'observe':
         trend_gate.schedule_next(key, decision.reason)

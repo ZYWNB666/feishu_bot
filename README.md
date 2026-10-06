@@ -247,6 +247,11 @@ Grafana `gt` 条件表示越高越严重，保留原 TPOT 行为：轻微越线�
 硬阈值、明显恶化和升级通知可 @ 当前值班人；观察到期的普通越线消息不 @。
 恢复后再次越线属于新一轮，当前版本仍不提供跨轮次冷却。
 
+新策略的 pending 复查需要连续 `confirm_cycles` 次 cancel 才结束观察（默认 2 次，
+约间隔 15 秒）。中途 observe/send 或升级缓解会清零计数，重启后计数从数据库恢复。
+HTTP 首次判断 cancel 仍立即结束；sent 状态仍等待 Grafana resolved webhook 收敛。
+旧环境变量试点不启用此防抖，保持原有立即取消行为。
+
 未执行迁移或没有任何启用策略时，回退 `TREND_GATE_ENABLED` / `TREND_RULE_UID`
 旧试点（默认关闭，默认 UID `tfk3tpot5p0e3f`），回退只警告一次。
 只要存在启用策略，便按每条路由的 UID 列表启用，无需打开旧试点环境开关；

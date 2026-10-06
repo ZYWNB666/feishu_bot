@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
+from mysql.connector import Error as MySQLError
 
 from config.config import Config
 from config.constants import (
@@ -401,14 +402,24 @@ def log_decision(key, decision):
         logger.exception('趋势决策日志写入失败: %s', key)
 
 
+def _execute_state(cursor, sql, params):
+    """旧表没有 cancel_streak 时，去掉清零字段后执行原 SQL。"""
+    try:
+        cursor.execute(sql, params)
+    except MySQLError as error:
+        if error.errno != 1054 or 'cancel_streak=0, ' not in sql:
+            raise
+        cursor.execute(sql.replace('cancel_streak=0, ', ''), params)
+
+
 def save_pending(key, config_id, data, first_seen, reason):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     with db_cursor() as (conn, cursor):
-        cursor.execute(
+        _execute_state(cursor,
             '''INSERT INTO alert_trend_state
                (rule_uid, group_id, fingerprint, config_id, payload, status, first_seen, next_check, reason)
                VALUES (%s,%s,%s,%s,%s,'pending',%s,%s,%s)
-               ON DUPLICATE KEY UPDATE config_id=VALUES(config_id), payload=VALUES(payload),
+               ON DUPLICATE KEY UPDATE cancel_streak=0, config_id=VALUES(config_id), payload=VALUES(payload),
                  first_seen=VALUES(first_seen), next_check=VALUES(next_check), reason=VALUES(reason),
                  last_sent_at=IF(status='resolved', NULL, last_sent_at),
                  `last_value`=IF(status='resolved', NULL, `last_value`), status='pending' ''',
@@ -421,8 +432,8 @@ def save_pending(key, config_id, data, first_seen, reason):
 
 def mark_sent(key, value, reason):
     with db_cursor() as (conn, cursor):
-        cursor.execute(
-            "UPDATE alert_trend_state SET status='sent', last_sent_at=UTC_TIMESTAMP(6), "
+        _execute_state(cursor,
+            "UPDATE alert_trend_state SET cancel_streak=0, status='sent', last_sent_at=UTC_TIMESTAMP(6), "
             "`last_value`=%s, next_check=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL %s SECOND), "
             "reason=%s WHERE rule_uid=%s AND group_id=%s AND fingerprint=%s",
             (value, TREND_SENT_CHECK_SECONDS, reason, *key),
@@ -432,8 +443,8 @@ def mark_sent(key, value, reason):
 
 def mark_resolved(key, reason):
     with db_cursor() as (conn, cursor):
-        cursor.execute(
-            "UPDATE alert_trend_state SET status='resolved', reason=%s "
+        _execute_state(cursor,
+            "UPDATE alert_trend_state SET cancel_streak=0, status='resolved', reason=%s "
             "WHERE rule_uid=%s AND group_id=%s AND fingerprint=%s",
             (reason, *key),
         )
@@ -443,8 +454,8 @@ def mark_resolved(key, reason):
 def restore_sent(key, reason):
     """升级发送失败后指标不再恶化，保留此前已发送的事件状态。"""
     with db_cursor() as (conn, cursor):
-        cursor.execute(
-            "UPDATE alert_trend_state SET status='sent', "
+        _execute_state(cursor,
+            "UPDATE alert_trend_state SET cancel_streak=0, status='sent', "
             "next_check=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL %s SECOND), reason=%s "
             "WHERE rule_uid=%s AND group_id=%s AND fingerprint=%s AND status='pending'",
             (TREND_SENT_CHECK_SECONDS, reason, *key),
@@ -452,13 +463,17 @@ def restore_sent(key, reason):
         conn.commit()
 
 
-def schedule_next(key, reason, delay=TREND_CHECK_SECONDS):
+def schedule_next(key, reason, delay=TREND_CHECK_SECONDS, *, cancel_streak=0):
     with db_cursor() as (conn, cursor):
-        cursor.execute(
-            "UPDATE alert_trend_state SET next_check=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL %s SECOND), reason=%s "
-            "WHERE rule_uid=%s AND group_id=%s AND fingerprint=%s AND status IN ('pending','sent')",
-            (delay, reason, *key),
+        sql = (
+            "UPDATE alert_trend_state SET cancel_streak=0, next_check=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL %s SECOND), reason=%s "
+            "WHERE rule_uid=%s AND group_id=%s AND fingerprint=%s AND status IN ('pending','sent')"
         )
+        params = (delay, reason, *key)
+        if cancel_streak:
+            sql = sql.replace('cancel_streak=0', 'cancel_streak=%s')
+            params = (cancel_streak, *params)
+        _execute_state(cursor, sql, params)
         conn.commit()
 
 
