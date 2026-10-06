@@ -8,7 +8,7 @@ from datetime import timezone
 
 from config.constants import TREND_CHECK_SECONDS, TREND_SENT_CHECK_SECONDS
 from db.pool import db_cursor
-from feishu_utils import trend_gate
+from feishu_utils import trend_gate, trend_digest
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,9 @@ def run_pending_once(feishu_client):
                 trend_gate.schedule_next(key, '复查异常，等待重试')
             except Exception:
                 logger.exception("更新待观察告警重试时间失败: %s", key)
+    # 无新策略时不产生额外群消息，保持旧试点的发送行为。
+    if trend_gate.enabled_policies():
+        trend_digest.update_digests(feishu_client)
 
 
 def _process_pending_row(key, feishu_client):

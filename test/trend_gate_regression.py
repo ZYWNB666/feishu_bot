@@ -5,7 +5,7 @@ import json
 import sys
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -15,7 +15,7 @@ os.environ.setdefault('APP_SECRET', 'test-app-secret')
 os.environ.setdefault('MYSQL_PASSWORD', 'test-password')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from feishu_utils import alert_handler, trend_gate, trend_worker
+from feishu_utils import alert_handler, trend_gate, trend_worker, trend_digest
 
 
 def setUpModule():
@@ -485,6 +485,97 @@ class RecoveryConfirmationTests(unittest.TestCase):
             trend_worker._process_pending_row(self.key, object())
             send.assert_called_once()
             mark.assert_called_once_with(self.key, .7, '下限')
+
+
+class DigestTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 10, 6, 10, 0, 10, tzinfo=timezone.utc)
+        self.row = {'group_id': 'g', 'rule_uid': 'r', 'fingerprint': 'f',
+                    'first_seen': self.now.replace(tzinfo=None) - timedelta(seconds=100),
+                    'next_check': self.now + timedelta(seconds=30),
+                    'metric_value': .98, 'reason': '观察',
+                    'payload': {'alerts': [{'labels': {'alertname': '<at id="all">test</at>',
+                                                      'tenant': 't', 'model': 'm', 'ep': 'e'}}]}}
+
+    def test_card_hash_ignores_update_clock_and_never_renders_mentions(self):
+        with patch.object(trend_gate, '_load_rule', return_value=('q', .99, .995, 'lower_worse')):
+            first, digest = trend_digest.build_card([self.row], now=self.now)
+            _, unchanged = trend_digest.build_card([self.row], now=self.now + timedelta(seconds=5))
+            _, changed = trend_digest.build_card([{**self.row, 'metric_value': .97}], now=self.now)
+        card = json.loads(first)
+        self.assertTrue(card['config']['update_multi'])
+        self.assertEqual(digest, unchanged)
+        self.assertNotEqual(digest, changed)
+        self.assertTrue(all(e['text']['tag'] == 'plain_text' for e in card['elements'] if 'text' in e))
+        self.assertIn('0.98 / 触发阈值 <= 0.99', card['elements'][0]['text']['content'])
+        self.assertIn('tenant=t / model=m / ep=e', card['elements'][0]['text']['content'])
+        self.assertIn('更新于', card['elements'][-1]['elements'][0]['content'])
+        _, empty_a = trend_digest.build_card([], now=self.now)
+        _, empty_b = trend_digest.build_card([], now=self.now + timedelta(hours=1))
+        self.assertEqual(empty_a, empty_b)
+
+    def test_one_card_per_group_patch_skip_clear_and_reuse(self):
+        client = MagicMock()
+        client.send.side_effect = ['mid-g', 'mid-h']
+        rows = [self.row, {**self.row, 'fingerprint': 'f2'}, {**self.row, 'group_id': 'h'}]
+        saved = {}
+        def save(group, mid, content_hash):
+            saved[group] = {'message_id': mid, 'content_hash': content_hash}
+        original_build = trend_digest.build_card
+        with patch.object(trend_digest, '_load_rows', side_effect=lambda: (rows, dict(saved))), \
+             patch.object(trend_digest, '_save_digest', side_effect=save), \
+             patch.object(trend_digest, 'build_card', side_effect=lambda items: original_build(items, self.now)), \
+             patch.object(trend_gate, '_load_rule', return_value=('q', 30, 25, 'higher_worse')):
+            trend_digest.update_digests(client)
+            self.assertEqual(client.send.call_count, 2)
+            g_card = json.loads(client.send.call_args_list[0].args[3])
+            self.assertEqual(len([e for e in g_card['elements'] if e['tag'] == 'div']), 2)
+            trend_digest.update_digests(client)
+            client.patch_message.assert_not_called()
+            rows.clear()
+            trend_digest.update_digests(client)
+            self.assertEqual(client.patch_message.call_count, 2)
+            self.assertIn('当前无观察中的趋势告警', client.patch_message.call_args.args[1])
+            trend_digest.update_digests(client)
+            self.assertEqual(client.patch_message.call_count, 2)
+            rows.append(self.row)
+            trend_digest.update_digests(client)
+            self.assertEqual(client.send.call_count, 2)
+            self.assertEqual(client.patch_message.call_args.args[0], 'mid-g')
+
+    def test_digest_failures_are_isolated_and_do_not_store_failed_hash(self):
+        client = MagicMock()
+        client.patch_message.side_effect = RuntimeError('飞书异常')
+        client.send.return_value = 'mid-h'
+        with patch.object(trend_digest, '_load_rows', return_value=(
+                [self.row, {**self.row, 'group_id': 'h'}], {'g': {'message_id': 'mid-g'}})), \
+             patch.object(trend_digest, '_save_digest') as save, \
+             patch.object(trend_gate, '_load_rule', return_value=('q', 30, 25, 'higher_worse')):
+            trend_digest.update_digests(client)
+            self.assertEqual(save.call_count, 1)
+            self.assertEqual(save.call_args.args[0], 'h')
+        with patch.object(trend_digest, '_load_rows', side_effect=RuntimeError('DB unavailable')):
+            trend_digest.update_digests(client)
+
+    def test_pending_query_and_empty_due_round_still_refresh_digest(self):
+        with fake_db() as pair, patch.object(trend_digest, 'db_cursor') as db:
+            db.return_value.__enter__.return_value = pair
+            pair[1].fetchall.side_effect = [[self.row], []]
+            pending, _ = trend_digest._load_rows()
+            self.assertEqual(len(pending), 1)
+            self.assertNotIn('next_check', pair[1].execute.call_args_list[0].args[0])
+        with patch.object(trend_gate, 'trends_enabled', return_value=True), \
+             patch.object(trend_gate, 'enabled_policies', return_value={1: trend_gate.TrendPolicy()}), \
+             patch.object(trend_gate, 'due_active', return_value=[]), \
+             patch.object(trend_digest, 'update_digests') as update:
+            trend_worker.run_pending_once(object())
+            update.assert_called_once()
+        with patch.object(trend_gate, 'trends_enabled', return_value=True), \
+             patch.object(trend_gate, 'enabled_policies', return_value={}), \
+             patch.object(trend_gate, 'due_active', return_value=[]), \
+             patch.object(trend_digest, 'update_digests') as update:
+            trend_worker.run_pending_once(object())
+            update.assert_not_called()
 
 
 class PolicyApiTests(unittest.TestCase):

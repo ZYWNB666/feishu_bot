@@ -71,6 +71,16 @@ CREATE TABLE IF NOT EXISTS alert_trend_decision_log (
     KEY idx_trend_decision_instance (rule_uid, group_id, fingerprint)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='趋势告警决策日志';
 
+-- 观察期汇总卡片：每群一张，结束观察后仍保留消息 ID
+CREATE TABLE IF NOT EXISTS alert_trend_digest (
+    group_id VARCHAR(128) NOT NULL,
+    message_id VARCHAR(64) DEFAULT NULL,
+    content_hash VARCHAR(64) DEFAULT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (group_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='趋势告警观察期汇总卡片（每群一张）';
+
 -- 飞书用户表（姓名 → open_id 映射，供 oncall 艾特使用）
 CREATE TABLE IF NOT EXISTS feishu_users (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
