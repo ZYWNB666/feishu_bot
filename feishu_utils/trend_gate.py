@@ -275,22 +275,36 @@ def is_enabled_for(data):
     alerts = data.get('alerts') or []
     uid = rule_uid(data)
     if not uid or not alerts[0].get('fingerprint'):
+        logger.info('event=trend.select rule_uid=%s mode=%s enabled=False reason=缺少单实例规则UID或fingerprint，沿用普通路由',
+                    uid, Config.TREND_GATE_MODE)
         return False
     policies = enabled_policies()
     default = global_policy()
     if policies or default or Config.TREND_GATE_MODE != 'legacy':
         candidates = [*policies.values(), default]
-        enabled = any(policy_matches(policy, data) and can_evaluate(policy, uid)
-                      for policy in candidates)
+        matched = [policy for policy in candidates if policy_matches(policy, data)]
+        enabled = any(can_evaluate(policy, uid) for policy in matched)
+        reason = ('匹配趋势启用范围，规则支持判断' if enabled
+                  else '已匹配范围，但指标或规则无法进行趋势判断' if matched
+                  else '未匹配趋势启用范围，沿用普通路由')
     else:
         enabled = Config.TREND_GATE_ENABLED and uid == Config.TREND_RULE_UID
-    logger.info('event=trend.select rule_uid=%s mode=%s enabled=%s', uid, Config.TREND_GATE_MODE, enabled)
-    if not enabled:
-        return False
+        reason = '旧试点规则匹配' if enabled else '旧试点关闭或规则UID不匹配，沿用普通路由'
+    labels = alerts[0].get('labels') or {}
+    if labels.get('severity') == 'phone' and (policies or default or Config.TREND_GATE_MODE != 'legacy'):
+        reason = '电话级别告警跳过趋势门控，沿用普通路由'
+    elif str(labels.get('trend_gate', '')).lower() in ('false', 'off', '0') and (policies or default or Config.TREND_GATE_MODE != 'legacy'):
+        reason = '告警标签显式关闭趋势判断，沿用普通路由'
     status = data.get('_original_status', data.get('status'))
-    return alerts[0].get('status') == 'firing' or (
+    eligible_status = alerts[0].get('status') == 'firing' or (
         status == 'resolved' and alerts[0].get('status') == 'resolved'
     )
+    if enabled and not eligible_status:
+        reason = '当前状态不进入趋势处理，沿用普通路由'
+    enabled = enabled and eligible_status
+    logger.info('event=trend.select rule_uid=%s mode=%s enabled=%s reason=%s',
+                uid, Config.TREND_GATE_MODE, enabled, reason)
+    return enabled
 
 
 def state_key(data, group_id):

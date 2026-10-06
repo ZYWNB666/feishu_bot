@@ -24,7 +24,7 @@ from config.constants import (
     RESOLVED_DEDUP_TTL,
 )
 from utils.bounded_cache import BoundedTTLCache
-from utils.alert_trace import traced_request, traced_route, route_maid, set_maid, contextual_target
+from utils.alert_trace import traced_request, traced_route, route_maid, set_maid, contextual_target, diagnostic_json, route_context
 
 # ── 告警去重缓存（基于 fingerprint+status 哈希）──
 # 使用带容量上限的 TTL 缓存，防止长时间运行后内存无限增长
@@ -364,6 +364,15 @@ def process_alert_request(data, feishu_client):
         configs = _find_alert_configs(data)
         logger.info('event=alert.received status=%s alerts=%s routes=%s',
                     data.get('status'), len(data.get('alerts', [])), len(configs))
+        for alert in data.get('alerts', []):
+            logger.info('event=alert.detail 告警详情=%s', diagnostic_json({
+                key: alert.get(key) for key in (
+                    'status', 'fingerprint', 'labels', 'annotations', 'values', 'valueString',
+                    'startsAt', 'endsAt', 'generatorURL')
+            }))
+        logger.debug('event=alert.payload 接收内容=%s', diagnostic_json({
+            k: v for k, v in data.items() if not k.startswith('_')
+        }))
         if trend_gate.is_enabled_for(data):
             return _process_trend_request(data, feishu_client, configs=configs)
 
@@ -526,9 +535,12 @@ def _find_alert_configs(data):
     """查找路由并提前分配 MAID；日志只打印必要字段，不输出整行配置。"""
     labels = extract_all_labels(data)
     configs = get_alert_config_by_labels(labels) if labels else []
+    matched_by = 'labels' if configs else 'alertid'
+    fallback_alertids = []
     if not configs:
         configs = []
-        for alertid in extract_alertids(data):
+        fallback_alertids = extract_alertids(data)
+        for alertid in fallback_alertids:
             row = get_alert_config_by_alertid(alertid)
             if row:
                 configs.append(row)
@@ -553,6 +565,17 @@ def _find_alert_configs(data):
     logger.info('event=route.match alertname=%s config_ids=%s groups=%s',
                 extract_alertname(data), [r.get('id') for r in configs],
                 [r.get('group_id') for r in configs])
+    logger.info('event=route.lookup 标签=%s alertid回退候选=%s 匹配方式=%s 匹配路由数=%s',
+                diagnostic_json(labels), diagnostic_json(fallback_alertids),
+                matched_by if configs else 'none', len(configs))
+    for row in configs:
+        with route_context(data, row.get('group_id', '')):
+            logger.info('event=route.detail 命中路由=%s', diagnostic_json({
+                k: row.get(k) for k in ('id', 'alert_id', 'group_id', 'project', 'label_rules',
+                                       'rank', 'oncall_sync', 'template_type', 'trend_policy')
+            }))
+    if not configs:
+        logger.warning('event=route.unmatched 标签未匹配群路由，alertid回退也无结果；本次不会发送通知')
     return configs
 
 

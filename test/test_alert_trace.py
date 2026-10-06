@@ -202,6 +202,68 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(response['summary']['success'], 1)
         self.assertTrue(all(expected in r.maid for r in logs.records))
 
+    def test_unmatched_route_logs_payload_details_and_redacts_credentials(self):
+        data = payload()
+        data['alerts'][0]['labels'].update({'tenant': 'tenant-test', 'api_key': 'hidden-label'})
+        data['alerts'][0]['annotations'] = {'description': '当前值 31，阈值 30', 'token': 'hidden-token'}
+        data['alerts'][0]['values'] = {'A': 31, 'B': 30}
+        data['externalURL'] = 'https://user:hidden-pass@example.test/?app_key=hidden-url'
+        with patch.object(alert_handler, 'get_alert_config_by_labels', return_value=[]), \
+             patch.object(alert_handler, 'get_alert_config_by_alertid', return_value=None), \
+             patch.object(trend_gate, 'is_enabled_for', return_value=False), \
+             self.assertLogs(level='DEBUG') as logs:
+            _, status = alert_handler.process_alert_request(data, object())
+        self.assertEqual(status, 404)
+        text = '\n'.join(r.getMessage() for r in logs.records)
+        for value in ('event=alert.detail', 'event=alert.payload', 'tenant-test', 'fp-test',
+                      '当前值 31，阈值 30', '"A": 31', 'event=route.lookup', 'event=route.unmatched'):
+            self.assertIn(value, text)
+        for value in ('hidden-label', 'hidden-token', 'hidden-pass', 'hidden-url'):
+            self.assertNotIn(value, text)
+        self.assertTrue(all(r.maid != '-' for r in logs.records))
+
+    def test_matched_route_details_exclude_configuration_credentials(self):
+        route = {'id': 4, 'group_id': 'g1', 'project': 'test-project',
+                 'label_rules': '{"alertname":".*TTFT.*","api_key":"hidden-rule"}',
+                 'grafana_api_key': 'hidden-config'}
+        with trace.log_context(), \
+             patch.object(alert_handler, 'get_alert_config_by_labels', return_value=[route]), \
+             self.assertLogs(level='INFO') as logs:
+            alert_handler._find_alert_configs(payload())
+        text = '\n'.join(r.getMessage() for r in logs.records)
+        self.assertIn('event=route.detail', text)
+        self.assertIn('test-project', text)
+        self.assertIn('.*TTFT.*', text)
+        self.assertNotIn('hidden-rule', text)
+        self.assertNotIn('hidden-config', text)
+
+    def test_trend_skip_explains_scope_and_phone_bypass(self):
+        policy = trend_gate.TrendPolicy(match_labels=(('alertname', '.*(TPOT|TTFT).*'),))
+        for labels, reason in (({'alertname': 'CPU'}, '未匹配趋势启用范围'),
+                               ({'alertname': 'TTFT', 'severity': 'phone'}, '电话级别告警'),
+                               ({'alertname': 'TTFT', 'trend_gate': 'false'}, '显式关闭')):
+            data = payload()
+            data['alerts'][0]['labels'] = labels
+            with patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'labels'), \
+                 patch.object(trend_gate, 'enabled_policies', return_value={}), \
+                 patch.object(trend_gate, 'global_policy', return_value=policy), \
+                 patch.object(trend_gate, 'can_evaluate') as evaluate, \
+                 self.assertLogs(level='INFO') as logs:
+                self.assertFalse(trend_gate.is_enabled_for(data))
+            evaluate.assert_not_called()
+            self.assertIn(reason, logs.output[-1])
+
+    def test_unchanged_empty_digest_does_not_log_or_send(self):
+        _, content_hash = trend_digest.build_card([])
+        client = MagicMock()
+        with patch.object(trend_digest.logger, 'debug') as debug, \
+             patch.object(trend_digest.logger, 'info') as info:
+            trend_digest._update_group(client, 'g1', [], {'message_id': 'mid', 'content_hash': content_hash})
+        debug.assert_not_called()
+        info.assert_not_called()
+        client.send.assert_not_called()
+        client.patch_message.assert_not_called()
+
     def test_batch_trace_lookup_failure_does_not_drop_other_routes(self):
         data = payload()
         other = copy.deepcopy(data['alerts'][0])

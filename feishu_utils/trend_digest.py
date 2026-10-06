@@ -126,7 +126,6 @@ def _update_group(feishu_client, group_id, rows, previous):
                 return
             content, content_hash = build_card(rows)
             if message_id and content_hash == previous.get('content_hash'):
-                logger.debug('event=trend.digest.unchanged message_id=%s pending=%s', message_id, len(rows))
                 return
             operation = 'patch' if message_id else 'send'
             if message_id:

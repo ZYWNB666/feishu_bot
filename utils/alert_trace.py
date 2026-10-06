@@ -3,12 +3,37 @@
 import hashlib
 import json
 import logging
+import re
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from functools import wraps
 
 _context = ContextVar('alert_log_context', default=None)
+_sensitive_key = re.compile(r'password|passwd|secret|token|authorization|credential|(?:api|app|integration)[_-]?key', re.I)
+
+
+def diagnostic_json(value):
+    """保留告警诊断细节，屏蔽凭据字段、URL 认证及常见令牌。"""
+    def clean(item):
+        if isinstance(item, dict):
+            return {str(k): '[REDACTED]' if _sensitive_key.search(str(k)) else clean(v)
+                    for k, v in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [clean(v) for v in item]
+        if isinstance(item, str):
+            if item.lstrip().startswith(('{', '[')):
+                try:
+                    return clean(json.loads(item))
+                except ValueError:
+                    pass
+            item = re.sub(r'(https?://)[^/\s@]+@', r'\1[REDACTED]@', item)
+            item = re.sub(r'(?i)((?:password|passwd|secret|token|authorization|(?:api|app|integration)[_-]?key)\s*[=:]\s*)[^&\s,;]+',
+                          r'\1[REDACTED]', item)
+            item = re.sub(r'(?i)\bBearer\s+[^\s,;]+', 'Bearer [REDACTED]', item)
+            return re.sub(r'\bglsa_[A-Za-z0-9_-]+', '[REDACTED]', item)
+        return item
+    return json.dumps(clean(value), ensure_ascii=False, default=str)
 
 
 def current_maid():

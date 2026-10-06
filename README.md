@@ -341,6 +341,10 @@ kubectl -n grafana logs deployment/feishu-bot-v1 --since=24h | rg -F '实际MAID
 窗口中位数、样本量、观察计时和原因；`trend.notify.skip` 记录已通知后的抑制；
 `trend.state.*`、`trend.recheck.schedule` 记录状态与下次复查；`alert.mention`
 记录最终 @ 人数，`alert.callback` 记录卡片操作。数据库决策表结构无需迁移。
+`alert.detail` 在 INFO 级别记录标签、注释、值、fingerprint 和起止时间；
+`route.lookup/detail/unmatched` 记录匹配输入、命中路由及未匹配结果。
+DEBUG 级别另有 `alert.payload` 接收内容，凭据字段和常见令牌会脱敏。
+未进入趋势判断也会记录原因；无变化的观察汇总不重复刷日志。
 启动、路由尚未确定时的基础设施错误、健康检查等无具体告警上下文的日志显示 `maid=-`；
 旧日志不会补写字段。完整历史需在日志平台按 MAID 检索，容器日志受保留时间限制。
 
