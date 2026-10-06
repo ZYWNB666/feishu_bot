@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from db.pool import db_cursor
 from feishu_utils import trend_gate
+from utils.alert_trace import log_context, route_maid
 
 logger = logging.getLogger(__name__)
 
@@ -102,22 +103,39 @@ def update_digests(feishu_client):
     for row in pending:
         groups[row['group_id']].append(row)
     for group_id in sorted(set(groups) | set(digests)):
-        try:
-            with trend_gate.lock_for(('trend-digest', group_id)):
-                rows = groups[group_id]
-                previous = digests.get(group_id) or {}
-                message_id = previous.get('message_id')
-                if not rows and not message_id:
-                    continue
-                content, content_hash = build_card(rows)
-                if message_id and content_hash == previous.get('content_hash'):
-                    continue
-                if message_id:
-                    feishu_client.patch_message(message_id, content)
-                else:
-                    message_id = feishu_client.send('chat_id', group_id, 'interactive', content)
-                    if not message_id:
-                        raise RuntimeError('飞书未返回观察卡片 message_id')
-                _save_digest(group_id, message_id, content_hash)
-        except Exception:
-            logger.exception('更新趋势观察汇总失败: group_id=%s', group_id)
+        rows = groups[group_id]
+        maids = []
+        for row in rows:
+            try:
+                payload = json.loads(row['payload']) if isinstance(row['payload'], str) else row['payload']
+                maid = trend_gate.state_maid(row, group_id)
+                if maid:
+                    payload.setdefault('_route_maids', {})[group_id] = maid
+                maids.append(route_maid(payload, group_id))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass  # build_card 会记录具体解析错误，不阻断其他告警。
+        with log_context(maid=','.join(sorted(set(maids))) or '-', group_id=group_id):
+            _update_group(feishu_client, group_id, rows, digests.get(group_id) or {})
+
+
+def _update_group(feishu_client, group_id, rows, previous):
+    try:
+        with trend_gate.lock_for(('trend-digest', group_id)):
+            message_id = previous.get('message_id')
+            if not rows and not message_id:
+                return
+            content, content_hash = build_card(rows)
+            if message_id and content_hash == previous.get('content_hash'):
+                logger.debug('event=trend.digest.unchanged message_id=%s pending=%s', message_id, len(rows))
+                return
+            operation = 'patch' if message_id else 'send'
+            if message_id:
+                feishu_client.patch_message(message_id, content)
+            else:
+                message_id = feishu_client.send('chat_id', group_id, 'interactive', content)
+                if not message_id:
+                    raise RuntimeError('飞书未返回观察卡片 message_id')
+            _save_digest(group_id, message_id, content_hash)
+            logger.info('event=trend.digest.%s message_id=%s pending=%s', operation, message_id, len(rows))
+    except Exception:
+        logger.exception('更新趋势观察汇总失败: group_id=%s', group_id)

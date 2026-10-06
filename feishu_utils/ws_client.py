@@ -44,7 +44,6 @@ def _make_card_action_bridge(feishu_client):
         result = {}
         try:
             raw = json.loads(lark.JSON.marshal(data))
-            logger.debug("WS 收到卡片回调: %s", raw)
             result = process_card_callback(raw, feishu_client) or {}
         except Exception as e:
             logger.error("WS 卡片回调处理失败: %s", e, exc_info=True)

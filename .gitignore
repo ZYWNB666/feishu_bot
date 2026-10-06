@@ -69,4 +69,5 @@ Desktop.ini
 # 如有敏感信息的测试文件可以在这里添加
 test_*.py
 !test/test_feishu_user_sync.py
+!test/test_alert_trace.py
 example_send_local.py

@@ -9,6 +9,7 @@ from mysql.connector import Error
 from config import config
 from config.constants import MAID_LENGTH
 from db.pool import db_cursor
+from utils.alert_trace import current_maid
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,8 @@ def save_dbdata(post_data, project, group_id=None):
         # 备用：如果 Grafana 没有发 startsAt 则用当前本地时间（容器已配置上海时区）
         startsAtTime = datetime.datetime.now().astimezone().isoformat()
 
-    random_number = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(MAID_LENGTH))
+    trace_maid = current_maid()
+    random_number = trace_maid or ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(MAID_LENGTH))
 
     matchers = []
     fingerprints = []
@@ -69,6 +71,9 @@ def save_dbdata(post_data, project, group_id=None):
                 INSERT INTO alert_data (id, alertlabels, project, alerttime, fingerprints, group_id)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """
+            if trace_maid:
+                # 重投、发送重试和恶化升级沿用同一 MAID，保留已有静默/消息字段。
+                insert_query += ' ON DUPLICATE KEY UPDATE id=id'
             cursor.execute(insert_query, (
                 random_number, json_data_to_insert, project, startsAtTime, fingerprints_json, group_id
             ))

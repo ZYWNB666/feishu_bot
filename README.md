@@ -263,7 +263,7 @@ TREND_GATE_MODE=all
 ```
 
 ```json
-{"trend_policy":{"match_all":true,"observe_seconds":90}}
+{"trend_policy":{"match_all":true,"observe_seconds":120}}
 ```
 
 ```json
@@ -296,7 +296,7 @@ PUT `/api/alert_rules/<id>` 设置 `trend_policy`（JSON 对象或对象的 JSON
   "trend_policy": {
     "enabled": true,
     "rule_uids": ["成功率规则的UID"],
-    "observe_seconds": 90,
+    "observe_seconds": 120,
     "hard_floor": 0.95,
     "request_metric": "业务实际使用的请求counter指标名",
     "slow_window_seconds": 600,
@@ -312,11 +312,39 @@ UID 模式填写非空的 `rule_uids`；也可改用上述 `match_labels` 或 `m
 `hard_floor` 使用原查询单位：0–1 比例可配置 0.95，0–100 百分数应配置 95。
 硬下限缺省不启用。查询指标时按 tenant/model/ep 匹配唯一序列，无法唯一匹配则直接发送。
 
-Grafana `gt` 条件表示越高越严重，保留原 TPOT 行为：轻微越线观察 90 秒，
+Grafana `gt` 条件表示越高越严重，TPOT、TTFT 默认统一观察 120 秒，
 达到阈值 1.5 倍或最近一分钟明显恶化时立即发送。`lt` 表示越低越严重：
 先检查硬下限，再确认恢复；快窗口（60 秒）和慢窗口（默认 600 秒）的中位数均
 低于或等于触发阈值时立即发送；仅快窗口越线则观察，到期仍越线也发送。
 指标样本不足、规则或指标查询失败时直接发送，沿用原有 @ 配置。
+
+观察时长由 `TREND_OBSERVE_SECONDS=120` 统一配置（部署时放入 `feishu-bot-secret`）；
+已有路由若显式填写了 `observe_seconds`，仍优先使用路由值，应移除覆盖才能统一。
+120 秒从路由首次进入观察开始计算，不含 Grafana 自身 pending 和指标查询窗口。
+每 15 秒复查一次，到期在下一次复查中处理，存在调度和查询耗时；不增加动态延长。
+
+### MAID 日志关联
+
+路由匹配时即生成 MAID，观察 payload 持久化保存，后台复查、通知入库、发送、
+恢复及卡片操作沿用对应 MAID。正常 Grafana 输入按群组、fingerprint、startsAt
+识别同一轮；不同群组或新一轮触发分别生成 ID。缺少 startsAt 的输入使用随机 ID，
+趋势观察继续通过持久化 payload 关联。旧版本已发送告警的恢复和回调沿用原数据库 MAID。
+
+应用日志统一包含 `maid`、`request_id`、`group_id`、`fingerprint`。
+批次公共日志和观察汇总发送日志可含多个 MAID；查找时按 ID 本身做字符串匹配：
+
+```bash
+kubectl -n grafana logs deployment/feishu-bot-v1 --since=24h | rg -F '实际MAID'
+```
+
+`event=trend.select/route.select` 记录是否启用；`trend.evaluate` 记录指标、阈值、
+窗口中位数、样本量、观察计时和原因；`trend.notify.skip` 记录已通知后的抑制；
+`trend.state.*`、`trend.recheck.schedule` 记录状态与下次复查；`alert.mention`
+记录最终 @ 人数，`alert.callback` 记录卡片操作。数据库决策表结构无需迁移。
+启动、路由尚未确定时的基础设施错误、健康检查等无具体告警上下文的日志显示 `maid=-`；
+旧日志不会补写字段。完整历史需在日志平台按 MAID 检索，容器日志受保留时间限制。
+
+### 通知与恢复行为
 
 状态按规则 UID、群组、fingerprint 隔离。已通知的同一轮普通重复告警被抑制；
 数值比上次通知恶化 25% 才升级（越高越严重为 >=1.25 倍，越低越严重为 <=0.75 倍）。

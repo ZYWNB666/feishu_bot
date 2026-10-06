@@ -18,7 +18,6 @@ alerts_bp = Blueprint("alerts", __name__)
 def alert_api():
     """告警API，委托给 alert_handler 模块处理具体逻辑"""
     data = flask_request.get_json(silent=True)
-    logger.debug("Received alert request: %s", data)
     if not data:
         return jsonify({"code": 400, "msg": "请求体不能为空或非JSON格式"}), 400
 

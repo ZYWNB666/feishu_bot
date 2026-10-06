@@ -22,11 +22,11 @@ ALERT_LABEL_DEDUP_TTL = ALERT_DEDUP_TTL
 # 各类去重缓存的最大条目数（防止内存无限增长）
 ALERT_DEDUP_CACHE_MAXSIZE = int(os.getenv("ALERT_DEDUP_CACHE_MAXSIZE", "50000"))
 
-# 趋势告警：相同实例的重复投递冷却 5 分钟；待观察告警每 15 秒复查，最长 90 秒。
+# 趋势告警：相同实例的重复投递冷却 5 分钟；待观察告警每 15 秒复查，默认观察 120 秒。
 TREND_DEDUP_SECONDS = int(os.getenv("TREND_DEDUP_SECONDS", "300"))
 TREND_CHECK_SECONDS = int(os.getenv("TREND_CHECK_SECONDS", "15"))
 TREND_SENT_CHECK_SECONDS = int(os.getenv("TREND_SENT_CHECK_SECONDS", "30"))
-TREND_OBSERVE_SECONDS = int(os.getenv("TREND_OBSERVE_SECONDS", "90"))
+TREND_OBSERVE_SECONDS = int(os.getenv("TREND_OBSERVE_SECONDS", "120"))
 TREND_HARD_RATIO = float(os.getenv("TREND_HARD_RATIO", "1.5"))
 TREND_RISE_RATIO = float(os.getenv("TREND_RISE_RATIO", "0.15"))
 TREND_MIN_REQUESTS = int(os.getenv("TREND_MIN_REQUESTS", "20"))

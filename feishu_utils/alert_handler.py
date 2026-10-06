@@ -24,6 +24,7 @@ from config.constants import (
     RESOLVED_DEDUP_TTL,
 )
 from utils.bounded_cache import BoundedTTLCache
+from utils.alert_trace import traced_request, traced_route, route_maid, set_maid, contextual_target
 
 # ── 告警去重缓存（基于 fingerprint+status 哈希）──
 # 使用带容量上限的 TTL 缓存，防止长时间运行后内存无限增长
@@ -187,6 +188,7 @@ from alerts_format.savedb import (
     get_message_id_by_fingerprint,
     get_alerttime_by_fingerprint,
     get_all_fingerprints_by_fingerprint,
+    get_maid_by_fingerprints,
 )
 from feishu_utils.event_handler import alert_to_feishu
 from feishu_utils.alert_card_biz import build_biz_firing_card, build_biz_resolved_card
@@ -214,6 +216,7 @@ def _split_by_alert(data: dict) -> list:
     sub_payloads = []
     for alert in alerts:
         sub = dict(data)
+        sub.pop('_route_maids', None)
         sub['alerts'] = [alert]
         # 保留原始顶层状态，供 _is_all_resolved 判断使用
         sub['_original_status'] = original_status
@@ -263,6 +266,7 @@ def _group_and_aggregate_by_alertname(sub_payloads: list) -> list:
         else:
             # 合并同 alertname 的子 payload
             merged = dict(group[0])
+            merged.pop('_route_maids', None)
             merged['alerts'] = []
             for sub in group:
                 merged['alerts'].extend(sub.get('alerts', []))
@@ -278,17 +282,12 @@ def _group_and_aggregate_by_alertname(sub_payloads: list) -> list:
             merged['commonLabels'] = merged_common
             # 标记为已聚合，防止递归调用 process_alert_request 时再次拆分
             merged['_aggregated'] = True
-            # name 格式为 "alertname||tenant"，拆分后分别记录
-            parts = name.split('||', 1)
-            log_name = parts[0] if parts else name
-            log_tenant = parts[1] if len(parts) > 1 else ''
-            logger.info("聚合同 alertname '%s' tenant='%s' 的 %d 个子批次",
-                        log_name, log_tenant, len(group))
             aggregated.append(merged)
 
     return aggregated + resolved_payloads
 
 
+@traced_request
 def process_alert_request(data, feishu_client):
     """
     处理告警请求
@@ -315,11 +314,16 @@ def process_alert_request(data, feishu_client):
         sub_payloads = _split_by_alert(data) if not data.get('_aggregated') else [data]
         if len(sub_payloads) > 1:
             # 趋势试点必须逐实例判断；其他规则继续按原逻辑聚合。
-            trend_subs = [sub for sub in sub_payloads if trend_gate.is_enabled_for(sub)]
-            normal_subs = [sub for sub in sub_payloads if not trend_gate.is_enabled_for(sub)]
+            trend_subs, normal_subs = [], []
+            for sub in sub_payloads:
+                try:
+                    _find_alert_configs(sub)
+                except Exception:
+                    # 预先关联日志失败不终止整批；子请求按原有路径报告路由错误。
+                    normal_subs.append(sub)
+                    continue
+                (trend_subs if trend_gate.is_enabled_for(sub) else normal_subs).append(sub)
             sub_payloads = trend_subs + _group_and_aggregate_by_alertname(normal_subs)
-            logger.info("批次含 %d 条 alert，拆分+聚合后 %d 个子批次独立路由",
-                        len(data.get('alerts', [])), len(sub_payloads))
             all_responses = []
             all_failed = 0
             all_total = 0
@@ -341,6 +345,8 @@ def process_alert_request(data, feishu_client):
                 if 'data' in resp:
                     all_responses.extend(resp['data'])
             success_count = all_total - all_failed
+            logger.info('event=alert.batch.complete alerts=%s batches=%s routes=%s failed=%s',
+                        len(data.get('alerts', [])), len(sub_payloads), all_total, all_failed)
             all_routes_failed = all_total > 0 and all_failed == all_total
             return {
                 "code": 500 if all_routes_failed else 0,
@@ -354,8 +360,12 @@ def process_alert_request(data, feishu_client):
                 "summary": {"total": all_total, "success": success_count, "failed": all_failed}
             }, 500 if all_routes_failed else 200
 
+        # 先确定目标群和 MAID，使筛选、去重和查询日志也能按 MAID 检索。
+        configs = _find_alert_configs(data)
+        logger.info('event=alert.received status=%s alerts=%s routes=%s',
+                    data.get('status'), len(data.get('alerts', [])), len(configs))
         if trend_gate.is_enabled_for(data):
-            return _process_trend_request(data, feishu_client)
+            return _process_trend_request(data, feishu_client, configs=configs)
 
         # 去重逻辑（第一层：fingerprint 级别）：
         # - firing 批次：5 分钟内相同 fingerprint 组合只处理一次（防 Grafana repeat_interval 重复投递）
@@ -383,9 +393,6 @@ def process_alert_request(data, feishu_client):
             active_dedup_cache = _alert_dedup_cache
             active_dedup_lock = _alert_dedup_lock
 
-        # 查找匹配的告警配置
-        configs = _find_alert_configs(data)
-        
         # 未找到任何配置，返回404
         if not configs:
             logger.error("未找到任何匹配的告警配置")
@@ -516,53 +523,40 @@ def process_alert_request(data, feishu_client):
 
 
 def _find_alert_configs(data):
-    """
-    查找匹配的告警配置
-    
-    Args:
-        data: 告警数据
-    
-    Returns:
-        list: 匹配的配置列表
-    """
-    configs = []
-    all_labels = extract_all_labels(data)
-    
-    # 1. 尝试通过标签匹配查询（现在返回所有匹配的配置）
-    if all_labels:
-        logger.info("尝试通过标签匹配查询，提取到的标签： %s", all_labels)
-        matched_configs = get_alert_config_by_labels(all_labels)
-        
-        if matched_configs:
-            configs.extend(matched_configs)
-            logger.info("通过标签匹配查询，查询到 %d 个配置", len(matched_configs))
-            for config in matched_configs:
-                logger.info("  - 匹配路由: alert_id=%s, group_id=%s, label_rules=%s", 
-                           config.get('alert_id'), 
-                           config.get('group_id'),
-                           config.get('label_rules'))
-        else:
-            logger.info("通过标签匹配查询，未查询到配置")
-    
-    # 2. 如果通过标签匹配未查询到配置，尝试通过alertid匹配查询配置
+    """查找路由并提前分配 MAID；日志只打印必要字段，不输出整行配置。"""
+    labels = extract_all_labels(data)
+    configs = get_alert_config_by_labels(labels) if labels else []
     if not configs:
-        alertids = extract_alertids(data)
-        logger.info("尝试通过alertid匹配查询，提取到的alertid： %s", alertids)
-        
-        if alertids:
-            for alertid in alertids:
-                config_row = get_alert_config_by_alertid(alertid)
-                if config_row:
-                    configs.append(config_row)
-            
-            if configs:
-                logger.info("通过alertid匹配查询，查询到的配置： %s", configs)
-            else:
-                logger.info("通过alertid匹配查询，未查询到配置")
-    
+        configs = []
+        for alertid in extract_alertids(data):
+            row = get_alert_config_by_alertid(alertid)
+            if row:
+                configs.append(row)
+    for row in configs:
+        group_id = row.get('group_id', '')
+        if group_id not in data.get('_route_maids', {}):
+            previous = None
+            if trend_gate.rule_uid(data) and trend_gate.trends_enabled():
+                try:
+                    state = trend_gate.get_state(trend_gate.state_key(data, group_id))
+                    if state and (state['status'] in ('pending', 'sent') or _is_all_resolved(data)):
+                        previous = trend_gate.state_maid(state, group_id)
+                except Exception:
+                    logger.exception('读取告警的趋势 MAID 失败: group_id=%s', group_id)
+            if not previous and _is_all_resolved(data):
+                previous = get_maid_by_fingerprints(extract_fingerprints(data), group_id=group_id)
+            if previous:
+                data.setdefault('_route_maids', {})[group_id] = previous
+        route_maid(data, group_id)
+    if not configs:
+        route_maid(data, 'unrouted')
+    logger.info('event=route.match alertname=%s config_ids=%s groups=%s',
+                extract_alertname(data), [r.get('id') for r in configs],
+                [r.get('group_id') for r in configs])
     return configs
 
 
+@traced_route
 def _process_normal_trend_route(data, config_row, alertname, feishu_client):
     """趋势入口的普通路由保留同群同名冷却；失败撤销标记，恢复清除冷却。"""
     group_id = config_row.get('group_id', '')
@@ -584,9 +578,9 @@ def _process_normal_trend_route(data, config_row, alertname, feishu_client):
             _evict_dedup(label_key, cache=_alert_label_dedup_cache, lock=_alert_label_dedup_lock)
 
 
-def _process_trend_request(data, feishu_client):
+def _process_trend_request(data, feishu_client, configs=None):
     """试点规则的逐路由决策；观察中的告警不进入旧的内存去重缓存。"""
-    configs = _find_alert_configs(data)
+    configs = _find_alert_configs(data) if configs is None else configs
     if not configs:
         return {"error": "未找到匹配的告警配置"}, 404
 
@@ -623,6 +617,7 @@ def _process_trend_request(data, feishu_client):
     }, 500 if failed == total else 200
 
 
+@traced_route
 def _process_trend_config(data, config_row, alertname, feishu_client, key, policy=None):
     if policy and not _is_all_resolved(data) and not trend_gate.can_evaluate(policy, key[0]):
         return _process_normal_trend_route(data, config_row, alertname, feishu_client)
@@ -631,6 +626,14 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
     except Exception:
         logger.exception("趋势状态读取失败，按原流程发送: %s", key)
         return _process_normal_trend_route(data, config_row, alertname, feishu_client)
+
+    if state and state['status'] in ('pending', 'sent'):
+        previous_maid = trend_gate.state_maid(state, key[1])
+        if previous_maid:
+            data.setdefault('_route_maids', {})[key[1]] = previous_maid
+            set_maid(previous_maid)
+    logger.info('event=trend.state.loaded rule_uid=%s state=%s',
+                key[0], state['status'] if state else 'new')
 
     if _is_all_resolved(data):
         if state and state['status'] in ('pending', 'resolved') and not state.get('last_sent_at'):
@@ -661,6 +664,8 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
         if not worsened:
             reason = ('5 分钟内重复投递' if trend_gate.duplicate_sent(state)
                       else '同一轮告警已通知，未明显恶化')
+            logger.info('event=trend.notify.skip rule_uid=%s value=%s last_sent_value=%s reason=%s',
+                        key[0], decision.value, prior, reason)
             return {'group_id': key[1], 'success': True, 'skipped': True, 'reason': reason}
 
     if decision.action == 'cancel':
@@ -700,6 +705,7 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
     return response
 
 
+@traced_route
 def _process_single_alert_config(data, config_row, alertname, feishu_client, *, mention_oncall=None):
     """
     处理单个告警配置
@@ -720,6 +726,9 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
         config_row.get('alertmanager_url'),
         group_id=config_row.get('group_id'),
     )
+    if maid:
+        data.setdefault('_route_maids', {})[config_row.get('group_id', '')] = maid
+        set_maid(maid)
     # 判断是否为 resolved 告警（原始顶层 status=resolved 且所有 alert 都是 resolved）
     is_resolved = _is_all_resolved(data)
     logger.info(
@@ -766,6 +775,10 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
         )
     else:
         mentioned_user_list = []
+
+    logger.info('event=alert.mention resolved=%s phone=%s trend_urgent=%s oncall_sync=%s mentioned_users=%s',
+                is_resolved, is_phone_alert, mention_oncall,
+                bool(config_row.get('oncall_sync')), len(mentioned_user_list))
 
     # 确定告警级别
     alert_severity = _determine_alert_severity(severities, maid=maid)
@@ -1029,7 +1042,7 @@ def _create_phone_incident(data: dict, maid: str) -> str:
                     logger.info("📞 电话告警（回退旧接口）已成功触发: maid=%s", maid)
                 else:
                     logger.error("📞 电话告警（回退旧接口）触发失败: maid=%s", maid)
-            t = threading.Thread(target=_do_send_fallback, daemon=True)
+            t = threading.Thread(target=contextual_target(_do_send_fallback), daemon=True)
             t.start()
         return None
 

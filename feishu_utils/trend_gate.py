@@ -23,6 +23,8 @@ from config.constants import (
     TREND_SLOW_WINDOW_SECONDS, TREND_CONFIRM_CYCLES,
 )
 from db.pool import db_cursor
+from alerts_format.savedb import get_maid_by_fingerprints
+from utils.alert_trace import route_maid
 
 logger = logging.getLogger(__name__)
 _rule_cache = {}
@@ -195,7 +197,12 @@ def policy_for_route(config_row, data):
     # 显式路由配置覆盖全局；关闭/无效/未匹配均不回退全局。
     policy = (get_policy(config_row) if config_row.get('trend_policy') is not None
               else global_policy())
-    return policy if policy_matches(policy, data) else None
+    matched = policy_matches(policy, data)
+    logger.info('event=trend.route.select rule_uid=%s config_id=%s source=%s matched=%s observe_seconds=%s',
+                rule_uid(data), config_row.get('id'),
+                'route' if config_row.get('trend_policy') is not None else Config.TREND_GATE_MODE,
+                matched, policy.observe_seconds if policy else None)
+    return policy if matched else None
 
 
 def can_evaluate(policy, uid):
@@ -277,6 +284,7 @@ def is_enabled_for(data):
                       for policy in candidates)
     else:
         enabled = Config.TREND_GATE_ENABLED and uid == Config.TREND_RULE_UID
+    logger.info('event=trend.select rule_uid=%s mode=%s enabled=%s', uid, Config.TREND_GATE_MODE, enabled)
     if not enabled:
         return False
     status = data.get('_original_status', data.get('status'))
@@ -487,12 +495,30 @@ def decide(data, first_seen, policy=None):
                       else policy.request_metric)
     labels = data['alerts'][0].get('labels') or {}
     now = time.time()
+    started = time.monotonic()
+    logger.info('event=trend.query.start rule_uid=%s counter=%s window_seconds=%s step_seconds=15',
+                uid, request_metric, max(180, policy.slow_window_seconds + 60))
     points = _matching_points(
         _vm_query(expression, start=now - max(180, policy.slow_window_seconds + 60), end=now, step=15), labels
     )
     count = _request_count(labels, request_metric)
-    return classify(points, threshold, recovery_threshold, count, first_seen, now=now,
-                    policy=policy, direction=direction)
+    decision = classify(points, threshold, recovery_threshold, count, first_seen, now=now,
+                        policy=policy, direction=direction)
+    recent = [v for t, v in points if now - 60 <= t <= now + 5]
+    previous = [v for t, v in points if now - 120 <= t < now - 60]
+    logger.info(
+        'event=trend.evaluate rule_uid=%s action=%s reason=%s direction=%s value=%s '
+        'threshold=%s recovery_threshold=%s hard_ratio=%s hard_floor=%s '
+        'recent_median=%s previous_median=%s rise_ratio=%s samples=%s counter_count=%s '
+        'min_requests=%s elapsed_seconds=%.1f observe_seconds=%s remaining_seconds=%.1f '
+        'urgent=%s query_ms=%.1f',
+        uid, decision.action, decision.reason, direction, decision.value, threshold, recovery_threshold,
+        policy.hard_ratio, policy.hard_floor, statistics.median(recent) if recent else None,
+        statistics.median(previous) if previous else None, policy.rise_ratio, len(points), count,
+        policy.min_requests, max(0, now-first_seen), policy.observe_seconds,
+        max(0, policy.observe_seconds-(now-first_seen)), decision.urgent,
+        (time.monotonic()-started)*1000)
+    return decision
 
 
 def get_state(key):
@@ -505,8 +531,32 @@ def get_state(key):
         return cursor.fetchone()
 
 
+def state_maid(state, group_id):
+    """恢复持久化关联 ID；旧版已通知状态从原告警记录取回 MAID。"""
+    if not state:
+        return None
+    payload = state.get('payload') or {}
+    try:
+        payload = json.loads(payload) if isinstance(payload, str) else payload
+        maid = payload.get('_route_maids', {}).get(group_id)
+        if maid:
+            return maid
+        if state.get('last_sent_at'):
+            fingerprints = [a['fingerprint'] for a in payload.get('alerts', []) if a.get('fingerprint')]
+            maid = get_maid_by_fingerprints(fingerprints, group_id=group_id)
+            if maid:
+                return maid
+        if payload.get('alerts'):
+            return route_maid(payload, group_id)
+    except (ValueError, TypeError, AttributeError):
+        logger.warning('event=trend.trace.invalid_payload group_id=%s', group_id)
+    return None
+
+
 def log_decision(key, decision):
     """保留每次路由决策，供试点复盘和后续模型评估。日志写入失败不影响发送。"""
+    logger.info('event=trend.decision rule_uid=%s action=%s reason=%s value=%s urgent=%s',
+                key[0], decision.action, decision.reason, decision.value, decision.urgent)
     try:
         with db_cursor() as (conn, cursor):
             cursor.execute(
@@ -546,6 +596,8 @@ def save_pending(key, config_id, data, first_seen, reason):
              now + timedelta(seconds=TREND_CHECK_SECONDS), reason),
         )
         conn.commit()
+    logger.info('event=trend.state.pending rule_uid=%s next_check_seconds=%s reason=%s',
+                key[0], TREND_CHECK_SECONDS, reason)
 
 
 def mark_sent(key, value, reason):
@@ -557,6 +609,7 @@ def mark_sent(key, value, reason):
             (value, TREND_SENT_CHECK_SECONDS, reason, *key),
         )
         conn.commit()
+    logger.info('event=trend.state.sent rule_uid=%s value=%s reason=%s', key[0], value, reason)
 
 
 def mark_resolved(key, reason):
@@ -567,6 +620,7 @@ def mark_resolved(key, reason):
             (reason, *key),
         )
         conn.commit()
+    logger.info('event=trend.state.resolved rule_uid=%s reason=%s', key[0], reason)
 
 
 def restore_sent(key, reason):
@@ -579,6 +633,7 @@ def restore_sent(key, reason):
             (TREND_SENT_CHECK_SECONDS, reason, *key),
         )
         conn.commit()
+    logger.info('event=trend.state.restore_sent rule_uid=%s reason=%s', key[0], reason)
 
 
 def schedule_next(key, reason, delay=TREND_CHECK_SECONDS, *, cancel_streak=0):
@@ -593,6 +648,8 @@ def schedule_next(key, reason, delay=TREND_CHECK_SECONDS, *, cancel_streak=0):
             params = (cancel_streak, *params)
         _execute_state(cursor, sql, params)
         conn.commit()
+    logger.info('event=trend.recheck.schedule rule_uid=%s next_check_seconds=%s cancel_streak=%s reason=%s',
+                key[0], delay, cancel_streak, reason)
 
 
 def due_active(limit=50):

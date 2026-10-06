@@ -33,6 +33,7 @@ from config.constants import (
 )
 from db.pool import db_cursor
 from utils.bounded_cache import BoundedTTLCache
+from utils.alert_trace import traced_request, set_maid, contextual_target
 
 logger = logging.getLogger(__name__)
 
@@ -476,7 +477,7 @@ def handle_silence_action(maid, duration, open_message_id, feishu_client, operat
                 pass
             logger.error("处理静默时出错: maid=%s error=%s", maid, e)
 
-    thread = threading.Thread(target=process_silence)
+    thread = threading.Thread(target=contextual_target(process_silence))
     thread.daemon = True
     thread.start()
 
@@ -552,7 +553,7 @@ def handle_silence_until_action(
             except Exception:
                 pass
 
-    thread = threading.Thread(target=process_silence_until, daemon=True)
+    thread = threading.Thread(target=contextual_target(process_silence_until), daemon=True)
     thread.start()
 
 
@@ -612,7 +613,7 @@ def handle_cancel_silence_action(maid, open_message_id, feishu_client, operator_
                 pass
             logger.error("处理取消静默时出错: maid=%s error=%s", maid, e)
 
-    thread = threading.Thread(target=process_cancel_silence)
+    thread = threading.Thread(target=contextual_target(process_cancel_silence))
     thread.daemon = True
     thread.start()
 
@@ -713,7 +714,7 @@ def handle_ack_incident_action(maid, incident_id, open_message_id, feishu_client
                 maid, incident_id, e
             )
 
-    thread = threading.Thread(target=process_ack)
+    thread = threading.Thread(target=contextual_target(process_ack))
     thread.daemon = True
     thread.start()
 
@@ -845,8 +846,6 @@ def parse_callback_data(data):
     Returns:
         tuple: (action_type, action_value, open_message_id, open_id)
     """
-    logger.info("收到卡片回调")
-    
     # 验证回调（URL验证）
     if "challenge" in data:
         logger.info("URL验证请求")
@@ -912,6 +911,7 @@ def is_duplicate_callback(action_type, action_value, open_message_id):
     return False
 
 
+@traced_request
 def process_card_callback(data, feishu_client):
     """
     处理飞书卡片交互回调
@@ -937,6 +937,8 @@ def process_card_callback(data, feishu_client):
             return {}
 
         maid = action_value.get("maid")
+        set_maid(maid)
+        logger.info('event=alert.callback action=%s message_id=%s', action_type, open_message_id)
         
         # 去重检查
         if action_type != "silence" and is_duplicate_callback(action_type, action_value, open_message_id):

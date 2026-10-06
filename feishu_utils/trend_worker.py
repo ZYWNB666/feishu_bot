@@ -12,6 +12,7 @@ from config.constants import (
 )
 from db.pool import db_cursor
 from feishu_utils import trend_gate, trend_digest
+from utils.alert_trace import route_context, set_maid
 
 logger = logging.getLogger(__name__)
 _last_log_cleanup_at = None
@@ -46,15 +47,27 @@ def run_pending_once(feishu_client):
         return
     for row in trend_gate.due_active():
         key = (row['rule_uid'], row['group_id'], row['fingerprint'])
-        try:
-            with trend_gate.lock_for(key):
-                _process_pending_row(key, feishu_client)
-        except Exception:
-            logger.exception("待观察告警复查失败: %s", key)
+        payload = row.get('payload') or {}
+        if isinstance(payload, str):
             try:
-                trend_gate.schedule_next(key, '复查异常，等待重试')
+                payload = json.loads(payload)
+            except ValueError:
+                # 仅建立错误日志上下文；实际处理仍读取原值并报错、安排重试。
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if not payload:
+            payload = {'alerts': [{'fingerprint': key[2]}]}
+        with route_context(payload, key[1]):
+            try:
+                with trend_gate.lock_for(key):
+                    _process_pending_row(key, feishu_client)
             except Exception:
-                logger.exception("更新待观察告警重试时间失败: %s", key)
+                logger.exception("待观察告警复查失败: %s", key)
+                try:
+                    trend_gate.schedule_next(key, '复查异常，等待重试')
+                except Exception:
+                    logger.exception("更新待观察告警重试时间失败: %s", key)
     # 无新策略时不产生额外群消息，保持旧试点的发送行为。
     if trend_gate.enabled_policies() or trend_gate.global_policy():
         trend_digest.update_digests(feishu_client)
@@ -62,17 +75,29 @@ def run_pending_once(feishu_client):
 
 
 def _process_pending_row(key, feishu_client):
-    from feishu_utils.alert_handler import _process_single_alert_config
-    from alerts_format.alert_json_format import extract_alertname
-
     # 与 HTTP 线程共用实例锁，避免恢复通知和待观察发送交错。
     current = trend_gate.get_state(key)
     if not current or current['status'] not in ('pending', 'sent'):
         return
+    data = json.loads(current['payload']) if isinstance(current['payload'], str) else current['payload']
+    maid = trend_gate.state_maid(current, key[1])
+    if maid:
+        data.setdefault('_route_maids', {})[key[1]] = maid
+        # 外层负责异常与重试日志，也要沿用旧卡片的 MAID。
+        set_maid(maid)
+    with route_context(data, key[1]):
+        logger.info('event=trend.recheck rule_uid=%s state=%s cancel_streak=%s',
+                    key[0], current['status'], current.get('cancel_streak', 0))
+        _process_pending_state(key, feishu_client, current, data)
+
+
+def _process_pending_state(key, feishu_client, current, data):
+    from feishu_utils.alert_handler import _process_single_alert_config
+    from alerts_format.alert_json_format import extract_alertname
+
     with db_cursor(dictionary=True) as (conn, cursor):
         cursor.execute('SELECT * FROM alert_config WHERE id=%s', (current['config_id'],))
         config_row = cursor.fetchone()
-    data = json.loads(current['payload']) if isinstance(current['payload'], str) else current['payload']
     policy = trend_gate.policy_for_route(config_row, data) if config_row else None
     try:
         if (config_row and (config_row.get('trend_policy') is not None

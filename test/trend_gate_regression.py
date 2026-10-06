@@ -25,6 +25,7 @@ def setUpModule():
         patch('requests.sessions.Session.request', side_effect=AssertionError('测试禁止外部 HTTP')),
         patch('db.pool._build_pool', side_effect=AssertionError('测试禁止真实数据库')),
         patch.object(trend_gate.Config, 'TREND_GATE_MODE', 'legacy'),
+        patch.object(trend_gate, 'get_maid_by_fingerprints', return_value=''),
     ]
     for guard in _external_guards:
         guard.start()
@@ -47,7 +48,7 @@ class TrendDecisionTests(unittest.TestCase):
     def test_small_stable_breach_waits_then_sends(self):
         points = [(t, 31.0) for t in range(20, 201, 15)]
         first = trend_gate.classify(points, 30, 25, 100, first_seen=160, now=200)
-        due = trend_gate.classify(points, 30, 25, 100, first_seen=100, now=200)
+        due = trend_gate.classify(points, 30, 25, 100, first_seen=80, now=200)
         self.assertEqual(first.action, 'observe')
         self.assertEqual(due.action, 'send')
         self.assertIs(trend_gate.oncall_mention_policy(due), False)
@@ -574,8 +575,8 @@ class DirectionTests(unittest.TestCase):
                  (0.98, 1.0, 30, 'observe', None, None),
                  (0.996, 0.98, 30, 'cancel', None, None),
                  (0.993, 0.98, 30, 'observe', None, None),
-                 (0.98, 1.0, 90, 'send', False, '达到最长观察时间且仍越线'),
-                 (0.993, 1.0, 90, 'cancel', None, None)]
+                 (0.98, 1.0, 120, 'send', False, '达到最长观察时间且仍越线'),
+                 (0.993, 1.0, 120, 'cancel', None, None)]
         for fast, slow, age, action, urgent, reason in cases:
             with self.subTest(fast=fast, slow=slow, age=age):
                 decision = self.decide_lower(fast, slow, age)
@@ -590,7 +591,7 @@ class DirectionTests(unittest.TestCase):
 
     def test_higher_worse_boundaries_and_missing_samples(self):
         for value, age, action in ((24.99, 10, 'cancel'), (25, 10, 'observe'),
-                                   (29.99, 90, 'cancel'), (30, 90, 'send'), (45, 1, 'send')):
+                                   (29.99, 120, 'cancel'), (30, 120, 'send'), (45, 1, 'send')):
             d = trend_gate.classify(self.points(value, value), 30, 25, 20, 1000-age, now=1000)
             self.assertEqual(d.action, action)
         for points in ([], [(1000, 31)], [(t-100, v) for t,v in self.points(31,31)]):

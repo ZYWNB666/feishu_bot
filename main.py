@@ -22,11 +22,14 @@ from feishu_utils.feishu_api import FeishuApiClient, FeishuApiException
 from feishu_utils.user_sync import sync_feishu_users
 from feishu_utils.ws_client import start_ws_client_in_thread
 from feishu_utils.trend_worker import start_trend_worker
+from utils.alert_trace import install_log_context
 
 # 配置日志（统一格式）
+install_log_context()
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - maid=%(maid)s request_id=%(request_id)s '
+           'group_id=%(group_id)s fingerprint=%(fingerprint)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
