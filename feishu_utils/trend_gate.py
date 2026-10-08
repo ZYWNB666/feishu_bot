@@ -7,7 +7,7 @@ import re
 import statistics
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -238,6 +238,7 @@ class Decision:
     reason: str
     urgent: bool | None = None  # None 表示查询不足，沿用路由原有 @ 策略
     direction: str = 'higher_worse'
+    short_recovered: bool = False  # 已确认近期观测恢复，优先于重复恶化的 @ 升级。
 
 
 def is_escalation(value, prior, direction='higher_worse'):
@@ -258,6 +259,8 @@ def oncall_mention_policy(decision, previous_value=None):
         return None
     if decision.urgent is None:
         return None
+    if decision.short_recovered:
+        return False
     if is_escalation(decision.value, previous_value, decision.direction):
         return True
     return decision.urgent
@@ -451,6 +454,68 @@ def with_decision_note(data, decision):
     return updated
 
 
+def _short_window_recovered(expression, labels, recovery_threshold, policy, now):
+    """仅对可识别的延迟 histogram 确认恢复；不推断未完成请求的状态。"""
+    expression = re.sub(r'\s*>=\s*0\s*$', '', expression).strip()
+    if expression.startswith('(') and expression.endswith(')'):
+        expression = expression[1:-1].strip()
+    match = re.fullmatch(
+        r'histogram_quantile\(\s*(?:0?\.\d+|1(?:\.0+)?)\s*,\s*'
+        r'sum\s+by\s*\((?P<groups>[\w,\s]+)\)\s*\(\s*rate\(\s*'
+        r'(?P<metric>magik_model_(?:ttft|tpot)_ms_bucket)'
+        r'\{(?P<selector>(?:[^"{}]|"(?:\\.|[^"\\])*")*)\}'
+        r'\[\d+[smhdw]\]\s*\)\s*\)\s*\)\s*'
+        r'(?:/\s*(?P<divisor>1000(?:\.0+)?|1(?:\.0+)?))?', expression)
+    if not match:
+        raise ValueError('短窗口不支持此指标表达式或单位转换')
+    groups = [name.strip() for name in match['groups'].split(',')]
+    if ('le' not in groups or any(not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]*', name)
+                                  for name in groups)):
+        raise ValueError('histogram 聚合维度无效')
+    dimensions = {key: labels[key] for key in ('tenant', 'model', 'ep') if labels.get(key)}
+    if not dimensions or not all(key in groups for key in dimensions):
+        raise ValueError('短窗口无法匹配告警维度')
+    raw_threshold = recovery_threshold * float(match['divisor'] or 1)
+    if not math.isfinite(raw_threshold) or raw_threshold <= 0:
+        raise ValueError('短窗口恢复阈值无效')
+    metric = match['metric'] + '{' + match['selector'] + '}'
+    grouping = ','.join(groups)
+    # 过滤原始样本超过 45 秒未更新的桶，避免把旧观测当成实时恢复。
+    query = (f'sum by({grouping})(increase({metric}[{HIGHER_RISE_WINDOW_SECONDS}s])) '
+             f'and (min by({grouping})(timestamp({metric})) >= {now - 45})')
+    results = _vm_query(query, start=now, end=now, step=15)
+    buckets = {}
+    for series in results:
+        if not all(series.get('metric', {}).get(key) == value for key, value in dimensions.items()):
+            continue
+        values = series.get('values') or []
+        if len(values) != 1:
+            raise ValueError('短窗口桶没有唯一取值')
+        timestamp, value = values[0]
+        boundary = float(series['metric']['le'])
+        count = float(value)
+        if (boundary in buckets or math.isnan(boundary) or boundary <= 0
+                or not math.isfinite(count) or count < 0 or abs(float(timestamp) - now) > 5):
+            raise ValueError('短窗口桶数据无效或匹配不唯一')
+        buckets[boundary] = count
+    total = buckets.get(math.inf)
+    eligible = [boundary for boundary in buckets if boundary <= raw_threshold]
+    if total is None or total <= 0 or total < policy.min_requests or not eligible:
+        raise ValueError('短窗口观测不足或缺少阈值桶')
+    ordered = sorted(buckets)
+    if any(buckets[b] + 1e-6 < buckets[a] for a, b in zip(ordered, ordered[1:])):
+        raise ValueError('短窗口累计桶计数不一致')
+    # 无精确边界时选更低的桶；只在全部观测均落入这个桶时确认恢复。
+    boundary = max(eligible)
+    slow_count = total - buckets[boundary]
+    recovered = slow_count <= 1e-6
+    logger.info('event=trend.short_window window_seconds=%s metric=%s raw_recovery_threshold=%s '
+                'bucket_boundary=%s observations=%s slow_observations=%s recovered=%s',
+                HIGHER_RISE_WINDOW_SECONDS, match['metric'], raw_threshold, boundary,
+                total, slow_count, recovered)
+    return recovered
+
+
 def classify(points, threshold, recovery_threshold, request_count, first_seen, now=None,
              policy=None, direction='higher_worse'):
     """根据真实时间序列判断；数据不足直接发送，避免误抑制。"""
@@ -520,6 +585,13 @@ def decide(data, first_seen, policy=None):
     count = _request_count(labels, request_metric)
     decision = classify(points, threshold, recovery_threshold, count, first_seen, now=now,
                         policy=policy, direction=direction)
+    if direction == 'higher_worse' and decision.action == 'send' and decision.urgent is not None:
+        try:
+            if _short_window_recovered(expression, labels, recovery_threshold, policy, now):
+                decision = replace(decision, urgent=False, short_recovered=True,
+                                   reason=decision.reason + '；最近90秒无新增慢请求，仅群通知')
+        except Exception as error:
+            logger.warning('event=trend.short_window status=fallback reason=%s，保留原有艾特判断', error)
     window_seconds = HIGHER_RISE_WINDOW_SECONDS if direction == 'higher_worse' else 60
     recent = [v for t, v in points if now - window_seconds <= t <= now + 5]
     previous = [v for t, v in points if now - 2 * window_seconds <= t < now - window_seconds]

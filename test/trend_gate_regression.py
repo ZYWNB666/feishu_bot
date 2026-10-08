@@ -94,6 +94,95 @@ class TrendDecisionTests(unittest.TestCase):
         self.assertIs(trend_gate.oncall_mention_policy(decision, previous_value=32.0), True)
 
 
+class ShortWindowTests(unittest.TestCase):
+    expression = ('histogram_quantile(0.99,sum by(model,le,tenant)('
+                  'rate(magik_model_ttft_ms_bucket{model="Kimi-K3",tenant="t"}[10m]))) /1000 >= 0')
+    labels = {'model': 'Kimi-K3', 'tenant': 't'}
+
+    def buckets(self, slow=0, total=231, boundary='30000.0', timestamp=1000):
+        return [{'metric': {**self.labels, 'le': le}, 'values': [[timestamp, str(count)]]}
+                for le, count in ((boundary, total-slow), ('+Inf', total))]
+
+    def test_seconds_milliseconds_wrappers_and_regex_selectors(self):
+        for expression, threshold, boundary in (
+                (self.expression, 30, '30000.0'),
+                ('(' + self.expression[:-5] + ') >= 0', 30, '30000.0'),
+                (self.expression.replace('/1000', '').replace('ttft', 'tpot')
+                 .replace('model="Kimi-K3"', 'model=~"Kimi.*"'), 30, '30.0')):
+            with self.subTest(expression=expression), \
+                 patch.object(trend_gate, '_vm_query', return_value=self.buckets(boundary=boundary)) as query:
+                self.assertTrue(trend_gate._short_window_recovered(
+                    expression, self.labels, threshold, trend_gate.TrendPolicy(), 1000))
+                self.assertIn('[90s]', query.call_args.args[0])
+                self.assertIn('timestamp(', query.call_args.args[0])
+                self.assertIn('>= 955', query.call_args.args[0])
+
+    def test_ongoing_slow_observations_do_not_suppress_mentions(self):
+        with patch.object(trend_gate, '_vm_query', return_value=self.buckets(slow=1)):
+            self.assertFalse(trend_gate._short_window_recovered(
+                self.expression, self.labels, 30, trend_gate.TrendPolicy(), 1000))
+
+    def test_missing_exact_bucket_uses_lower_boundary_conservatively(self):
+        with patch.object(trend_gate, '_vm_query', return_value=self.buckets(boundary='20000', slow=1)):
+            self.assertFalse(trend_gate._short_window_recovered(
+                self.expression, self.labels, 30, trend_gate.TrendPolicy(), 1000))
+
+    def test_incomplete_stale_inconsistent_and_wrong_dimension_data_fail_open(self):
+        wrong = self.buckets()
+        for row in wrong:
+            row['metric']['tenant'] = 'other'
+        for rows in ([], self.buckets(total=19), self.buckets()[:1],
+                     self.buckets(boundary='50000'), self.buckets(timestamp=900),
+                     self.buckets(slow=-1), self.buckets()+self.buckets(), wrong):
+            with self.subTest(rows=rows), patch.object(trend_gate, '_vm_query', return_value=rows):
+                with self.assertRaises(ValueError):
+                    trend_gate._short_window_recovered(
+                        self.expression, self.labels, 30, trend_gate.TrendPolicy(), 1000)
+        for expression in (self.expression.replace('/1000', '*2'), 'up',
+                           self.expression.replace('by(model,le,tenant)', 'by(model,le)')):
+            with self.subTest(expression=expression), patch.object(trend_gate, '_vm_query') as query:
+                with self.assertRaises(ValueError):
+                    trend_gate._short_window_recovered(
+                        expression, self.labels, 30, trend_gate.TrendPolicy(), 1000)
+                query.assert_not_called()
+
+    def test_incident_replay_recovery_retains_message_and_blocks_escalation_mention(self):
+        points = [(t, 40.1867 if t >= 910 else 30.2343) for t in range(820, 1001, 15)]
+        data = {'alerts': [{'generatorURL': 'https://g/alerting/grafana/x/view', 'labels': self.labels}]}
+        for rows, expected_recovery in ((self.buckets(), True), (self.buckets(slow=27), False),
+                                        ([], False)):
+            with self.subTest(rows=rows), \
+                 patch.object(trend_gate.Config, 'GRAFANA_RULES_READ_KEY', 'test'), \
+                 patch.object(trend_gate.Config, 'VM_QUERY_URL', 'http://vm/api/v1/query'), \
+                 patch.object(trend_gate, '_load_rule', return_value=(self.expression, 30, 30, 'higher_worse')), \
+                 patch.object(trend_gate.time, 'time', return_value=1000), \
+                 patch.object(trend_gate, '_vm_query', side_effect=[[], rows]), \
+                 patch.object(trend_gate, '_matching_points', return_value=points), \
+                 patch.object(trend_gate, '_request_count', return_value=226):
+                decision = trend_gate.decide(data, 1000)
+                self.assertEqual(decision.action, 'send')
+                self.assertEqual(decision.short_recovered, expected_recovery)
+                self.assertEqual(trend_gate.oncall_mention_policy(decision), not expected_recovery)
+                self.assertEqual(trend_gate.oncall_mention_policy(decision, previous_value=30),
+                                 not expected_recovery)
+
+    def test_short_query_timeout_preserves_original_decision(self):
+        data = {'alerts': [{'generatorURL': 'https://g/alerting/grafana/x/view', 'labels': self.labels}]}
+        for original in (trend_gate.Decision('send', 80, '达到硬上限', True),
+                         trend_gate.Decision('send', None, '指标样本不足，按原流程发送')):
+            with self.subTest(original=original), \
+                 patch.object(trend_gate.Config, 'GRAFANA_RULES_READ_KEY', 'test'), \
+                 patch.object(trend_gate.Config, 'VM_QUERY_URL', 'http://vm/api/v1/query'), \
+                 patch.object(trend_gate, '_load_rule', return_value=(self.expression, 30, 30, 'higher_worse')), \
+                 patch.object(trend_gate, '_vm_query', return_value=[]), \
+                 patch.object(trend_gate, '_matching_points', return_value=[]), \
+                 patch.object(trend_gate, '_request_count', return_value=100), \
+                 patch.object(trend_gate, 'classify', return_value=original), \
+                 patch.object(trend_gate, '_short_window_recovered', side_effect=TimeoutError('VM timeout')) as short:
+                self.assertIs(trend_gate.decide(data, 0), original)
+                self.assertEqual(short.call_count, 1 if original.urgent is not None else 0)
+
+
 class TrendMentionTests(unittest.TestCase):
     def test_pilot_group_message_mentions_oncall_only_when_urgent(self):
         data = {'status': 'firing', 'alerts': [{'status': 'firing'}]}
