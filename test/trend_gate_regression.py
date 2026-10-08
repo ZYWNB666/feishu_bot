@@ -48,7 +48,7 @@ class TrendDecisionTests(unittest.TestCase):
     def test_small_stable_breach_waits_then_sends(self):
         points = [(t, 31.0) for t in range(20, 201, 15)]
         first = trend_gate.classify(points, 30, 25, 100, first_seen=160, now=200)
-        due = trend_gate.classify(points, 30, 25, 100, first_seen=80, now=200)
+        due = trend_gate.classify(points, 30, 25, 100, first_seen=20, now=200)
         self.assertEqual(first.action, 'observe')
         self.assertEqual(due.action, 'send')
         self.assertIs(trend_gate.oncall_mention_policy(due), False)
@@ -56,12 +56,24 @@ class TrendDecisionTests(unittest.TestCase):
     def test_rising_or_hard_breach_sends_without_waiting(self):
         points = [(t, 30.0 if t < 140 else 38.0) for t in range(20, 201, 15)]
         rising = trend_gate.classify(points, 30, 25, 100, first_seen=190, now=200)
-        hard = trend_gate.classify(points[:-1] + [(200, 46.0)], 30, 25, 100,
+        hard = trend_gate.classify(points[:-1] + [(200, 76.0)], 30, 25, 100,
                                    first_seen=190, now=200)
         self.assertEqual(rising.action, 'send')
         self.assertEqual(hard.action, 'send')
         self.assertIs(trend_gate.oncall_mention_policy(rising), True)
         self.assertIs(trend_gate.oncall_mention_policy(hard), True)
+
+    def test_higher_worse_90_second_rise_requires_20_percent(self):
+        for recent_value, expected in ((35.9, 'observe'), (36.0, 'send')):
+            points = [(t, recent_value if t >= 910 else 30.0)
+                      for t in range(820, 1001, 15)]
+            with self.subTest(recent_value=recent_value):
+                decision = trend_gate.classify(points, 30, 25, 100, 990, now=1000)
+                self.assertEqual(decision.action, expected)
+        transient = [(t, 50.0 if t >= 970 else 30.0)
+                     for t in range(820, 1001, 15)]
+        self.assertEqual(trend_gate.classify(transient, 30, 25, 100, 990,
+                                             now=1000).action, 'observe')
 
     def test_recovery_cancels_and_low_sample_volume_fails_open(self):
         points = [(t, 24.0) for t in range(20, 201, 15)]
@@ -223,7 +235,7 @@ class TrendRoutingTests(unittest.TestCase):
         with patch.object(trend_gate, 'get_state', return_value=state), \
              patch.object(trend_gate, 'decide', side_effect=[
                  trend_gate.Decision('send', 35.0, '观察到期', urgent=False),
-                 trend_gate.Decision('send', 42.0, '最近一分钟明显恶化', urgent=True),
+                 trend_gate.Decision('send', 42.0, '最近90秒明显恶化', urgent=True),
              ]), \
              patch.object(trend_gate, 'log_decision'), \
              patch.object(trend_gate, 'schedule_next') as schedule, \
@@ -236,7 +248,7 @@ class TrendRoutingTests(unittest.TestCase):
         schedule.assert_called_once()
         send.assert_called_once()
         self.assertIs(send.call_args.kwargs['mention_oncall'], True)
-        mark.assert_called_once_with(self.key, 42.0, '最近一分钟明显恶化')
+        mark.assert_called_once_with(self.key, 42.0, '最近90秒明显恶化')
 
 
 class MixedRouteDedupTests(unittest.TestCase):
@@ -575,8 +587,8 @@ class DirectionTests(unittest.TestCase):
                  (0.98, 1.0, 30, 'observe', None, None),
                  (0.996, 0.98, 30, 'cancel', None, None),
                  (0.993, 0.98, 30, 'observe', None, None),
-                 (0.98, 1.0, 120, 'send', False, '达到最长观察时间且仍越线'),
-                 (0.993, 1.0, 120, 'cancel', None, None)]
+                 (0.98, 1.0, 180, 'send', False, '达到最长观察时间且仍越线'),
+                 (0.993, 1.0, 180, 'cancel', None, None)]
         for fast, slow, age, action, urgent, reason in cases:
             with self.subTest(fast=fast, slow=slow, age=age):
                 decision = self.decide_lower(fast, slow, age)
@@ -591,7 +603,8 @@ class DirectionTests(unittest.TestCase):
 
     def test_higher_worse_boundaries_and_missing_samples(self):
         for value, age, action in ((24.99, 10, 'cancel'), (25, 10, 'observe'),
-                                   (29.99, 120, 'cancel'), (30, 120, 'send'), (45, 1, 'send')):
+                                   (29.99, 180, 'cancel'), (30, 180, 'send'),
+                                   (74.9, 1, 'observe'), (75, 1, 'send')):
             d = trend_gate.classify(self.points(value, value), 30, 25, 20, 1000-age, now=1000)
             self.assertEqual(d.action, action)
         for points in ([], [(1000, 31)], [(t-100, v) for t,v in self.points(31,31)]):
@@ -609,7 +622,7 @@ class DirectionTests(unittest.TestCase):
         self.assertEqual(decision.action, 'observe')
         custom = trend_gate.classify(self.points(50, 50), 30, 25, 100, 990, now=1000, policy=policy)
         self.assertEqual(custom.action, 'observe')
-        self.assertEqual(trend_gate.classify(self.points(50, 50), 30, 25, 100, 990, now=1000).action, 'send')
+        self.assertEqual(trend_gate.classify(self.points(50, 50), 30, 25, 100, 990, now=1000).action, 'observe')
 
     def test_lower_incomplete_slow_window_fails_open(self):
         d = trend_gate.classify(self.points(.98)[-10:], .99, .995, 100, 990,

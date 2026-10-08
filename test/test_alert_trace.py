@@ -365,10 +365,10 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(process.call_count, 2)
         retry.assert_called_once_with(('rule-test', 'g1', 'bad'), '复查异常，等待重试')
 
-    def test_default_observation_boundary_is_120_seconds(self):
-        self.assertEqual(trend_gate.TrendPolicy().observe_seconds, 120)
+    def test_default_observation_boundary_is_180_seconds(self):
+        self.assertEqual(trend_gate.TrendPolicy().observe_seconds, 180)
         points = [(t, 31.0) for t in range(800, 1001, 15)]
-        for age, expected in ((90, 'observe'), (119, 'observe'), (120, 'send')):
+        for age, expected in ((120, 'observe'), (179, 'observe'), (180, 'send')):
             with self.subTest(age=age):
                 decision = trend_gate.classify(points, 30, 25, 100, 1000-age, now=1000)
                 self.assertEqual(decision.action, expected)
@@ -389,7 +389,8 @@ class TraceTests(unittest.TestCase):
         evidence = next(r for r in logs.records if 'event=trend.evaluate' in r.getMessage())
         self.assertEqual(evidence.maid, 'evaluation-maid')
         for field in ('threshold=30', 'recent_median=31', 'previous_median=31',
-                      'observe_seconds=120', 'remaining_seconds=60.0', 'counter_count=100'):
+                      'rise_window_seconds=90', 'observe_seconds=180',
+                      'remaining_seconds=120.0', 'counter_count=100'):
             self.assertIn(field, evidence.getMessage())
 
     def test_digest_send_has_all_pending_maids(self):

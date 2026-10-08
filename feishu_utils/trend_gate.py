@@ -27,6 +27,7 @@ from alerts_format.savedb import get_maid_by_fingerprints
 from utils.alert_trace import route_maid
 
 logger = logging.getLogger(__name__)
+HIGHER_RISE_WINDOW_SECONDS = 90
 _rule_cache = {}
 _rule_cache_lock = threading.Lock()
 _state_locks = [threading.Lock() for _ in range(128)]
@@ -457,8 +458,9 @@ def classify(points, threshold, recovery_threshold, request_count, first_seen, n
     policy = policy or TrendPolicy()
     if direction not in ('higher_worse', 'lower_worse'):
         raise ValueError('未知的趋势判断方向')
-    recent = [v for t, v in points if now - 60 <= t <= now + 5]
-    previous = [v for t, v in points if now - 120 <= t < now - 60]
+    window_seconds = HIGHER_RISE_WINDOW_SECONDS if direction == 'higher_worse' else 60
+    recent = [v for t, v in points if now - window_seconds <= t <= now + 5]
+    previous = [v for t, v in points if now - 2 * window_seconds <= t < now - window_seconds]
     slow = [v for t, v in points if now - policy.slow_window_seconds <= t <= now + 5]
     slow_incomplete = (direction == 'lower_worse' and (
         not points or points[0][0] > now - policy.slow_window_seconds + 15 or len(slow) < 2))
@@ -490,7 +492,7 @@ def classify(points, threshold, recovery_threshold, request_count, first_seen, n
     if (current_median >= threshold
             and current_median - previous_median >= threshold * 0.05
             and current_median >= previous_median * (1 + policy.rise_ratio)):
-        return Decision('send', latest, '最近一分钟明显恶化', urgent=True)
+        return Decision('send', latest, '最近90秒明显恶化', urgent=True)
     if now - first_seen >= policy.observe_seconds:
         if latest >= threshold:
             return Decision('send', latest, '达到最长观察时间且仍越线', urgent=False)
@@ -518,17 +520,18 @@ def decide(data, first_seen, policy=None):
     count = _request_count(labels, request_metric)
     decision = classify(points, threshold, recovery_threshold, count, first_seen, now=now,
                         policy=policy, direction=direction)
-    recent = [v for t, v in points if now - 60 <= t <= now + 5]
-    previous = [v for t, v in points if now - 120 <= t < now - 60]
+    window_seconds = HIGHER_RISE_WINDOW_SECONDS if direction == 'higher_worse' else 60
+    recent = [v for t, v in points if now - window_seconds <= t <= now + 5]
+    previous = [v for t, v in points if now - 2 * window_seconds <= t < now - window_seconds]
     logger.info(
         'event=trend.evaluate rule_uid=%s action=%s reason=%s direction=%s value=%s '
         'threshold=%s recovery_threshold=%s hard_ratio=%s hard_floor=%s '
-        'recent_median=%s previous_median=%s rise_ratio=%s samples=%s counter_count=%s '
+        'recent_median=%s previous_median=%s rise_window_seconds=%s rise_ratio=%s samples=%s counter_count=%s '
         'min_requests=%s elapsed_seconds=%.1f observe_seconds=%s remaining_seconds=%.1f '
         'urgent=%s query_ms=%.1f',
         uid, decision.action, decision.reason, direction, decision.value, threshold, recovery_threshold,
         policy.hard_ratio, policy.hard_floor, statistics.median(recent) if recent else None,
-        statistics.median(previous) if previous else None, policy.rise_ratio, len(points), count,
+        statistics.median(previous) if previous else None, window_seconds, policy.rise_ratio, len(points), count,
         policy.min_requests, max(0, now-first_seen), policy.observe_seconds,
         max(0, policy.observe_seconds-(now-first_seen)), decision.urgent,
         (time.monotonic()-started)*1000)
