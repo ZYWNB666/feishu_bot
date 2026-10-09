@@ -120,20 +120,18 @@ def extend_existing_silences(
                 else None
             )
             if returned_silence_id and str(returned_silence_id) != str(silence_id):
-                logger.error(
-                    "%s silence update returned a different ID: expected=%s actual=%s",
+                # 旧规则过期或更新影响历史时，Alertmanager 会创建替代规则并返回新 ID。
+                logger.info(
+                    "%s silence replaced during update: previous=%s actual=%s",
                     backend, silence_id, returned_silence_id,
                 )
-                return {
-                    "success": False,
-                    "message": f"{backend} silence update returned a different ID",
-                }
 
+            updated_silence_id = str(returned_silence_id or silence_id)
             target_ends.append(target_end)
-            updated_silence_ids.append(str(silence_id))
+            updated_silence_ids.append(updated_silence_id)
             logger.info(
                 "%s silence end updated: silence_id=%s ends_at=%s",
-                backend, silence_id, target_end.isoformat(),
+                backend, updated_silence_id, target_end.isoformat(),
             )
         except Exception as exc:
             logger.error(

@@ -672,6 +672,47 @@ class SilenceExtensionTests(unittest.TestCase):
         )
         self.assertNotIn("status", payload)
 
+    def test_grafana_replacement_silence_id_is_saved(self):
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import Mock
+
+        from alerts_format.grafana_silence import grafana_create_silence
+
+        now = datetime.now(timezone.utc)
+        get_response = Mock(status_code=200)
+        get_response.json.return_value = {
+            "id": "expired-silence",
+            "matchers": [{"name": "alertname", "value": "Test", "isEqual": True}],
+            "startsAt": (now - timedelta(hours=3)).isoformat(),
+            "endsAt": (now - timedelta(hours=1)).isoformat(),
+            "createdBy": "feishu_bot",
+            "comment": "test",
+            "status": {"state": "expired"},
+        }
+
+        for response_key in ("silenceID", "id"):
+            with self.subTest(response_key=response_key):
+                post_response = Mock(status_code=200)
+                post_response.json.return_value = {response_key: "replacement-silence"}
+                with (
+                    patch("alerts_format.grafana_silence.Config.GRAFANA_API_KEY", "test-key"),
+                    patch("alerts_format.grafana_silence._get_alert_data", return_value={
+                        "alertlabels": {"matchers": [{"matchers": get_response.json.return_value["matchers"]}]},
+                        "silenceid": ["expired-silence"],
+                    }),
+                    patch("alerts_format.grafana_silence._save_silence_ids") as save,
+                    patch("alerts_format.silence_extension.requests.get", return_value=get_response),
+                    patch("alerts_format.silence_extension.requests.post", return_value=post_response) as post,
+                ):
+                    result = grafana_create_silence("maid-replacement", 2, "https://grafana.test")
+
+                self.assertTrue(result["success"])
+                self.assertEqual(result["silence_ids"], ["replacement-silence"])
+                save.assert_called_once_with("maid-replacement", ["replacement-silence"])
+                self.assertEqual(post.call_count, 1)
+                self.assertEqual(post.call_args.kwargs["json"]["id"], "expired-silence")
+                self.assertGreater(datetime.fromisoformat(post.call_args.kwargs["json"]["endsAt"]), now)
+
     def test_existing_silence_can_be_set_to_an_absolute_end(self):
         from datetime import datetime, timedelta, timezone
         from unittest.mock import Mock, patch
