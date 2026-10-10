@@ -25,6 +25,7 @@ from config.constants import (
 from db.pool import db_cursor
 from alerts_format.savedb import get_maid_by_fingerprints
 from utils.alert_trace import route_maid
+from feishu_utils import latency_impact
 
 logger = logging.getLogger(__name__)
 HIGHER_RISE_WINDOW_SECONDS = 90
@@ -239,6 +240,7 @@ class Decision:
     urgent: bool | None = None  # None 表示查询不足，沿用路由原有 @ 策略
     direction: str = 'higher_worse'
     short_recovered: bool = False  # 已确认近期观测恢复，优先于重复恶化的 @ 升级。
+    notification_severity: str | None = None  # 仅经验证的 TTFT/TPOT 决策覆盖卡片等级。
 
 
 def is_escalation(value, prior, direction='higher_worse'):
@@ -257,6 +259,8 @@ def oncall_mention_policy(decision, previous_value=None):
     """只在趋势明确恶化时升级 @；查询失败时沿用原有告警策略。"""
     if decision.action != 'send':
         return None
+    if decision.notification_severity in ('p0', 'p1'):
+        return decision.notification_severity == 'p0'
     if decision.urgent is None:
         return None
     if decision.short_recovered:
@@ -264,6 +268,28 @@ def oncall_mention_policy(decision, previous_value=None):
     if is_escalation(decision.value, previous_value, decision.direction):
         return True
     return decision.urgent
+
+
+def grade_upgrade(decision, state):
+    """升级不依赖长窗口继续上涨；仅已成功发送的等级参与比较。"""
+    if not Config.TREND_IMPACT_ENABLED or not state or decision.action != 'send':
+        return False
+    payload = state.get('payload') or {}
+    payload = json.loads(payload) if isinstance(payload, str) else payload
+    previous = payload.get('_trend_last_notification_severity')
+    # 旧状态没有等级证据：首次确认 P0 允许补发一次，之后持久化消除重复。
+    if decision.notification_severity == 'p0':
+        return previous != 'p0'
+    # 已降为 P1 后失去查询证据，补发原级别一次；不能一直沿用旧 P1。
+    return previous == 'p1' and decision.urgent is None
+
+
+def mark_sent_decision(key, decision):
+    if Config.TREND_IMPACT_ENABLED:
+        mark_sent(key, decision.value, decision.reason,
+                  notification_severity=decision.notification_severity or 'original')
+    else:
+        mark_sent(key, decision.value, decision.reason)
 
 
 def rule_uid(data):
@@ -442,9 +468,12 @@ def _auto_request_metric(expression, direction):
 
 def with_decision_note(data, decision):
     """发送观察后的卡片时标出当前复查值，避免只展示首次 Webhook 的旧数值。"""
-    if decision.value is None:
-        return data
     updated = dict(data)
+    updated.pop('_trend_notification_severity', None)
+    if decision.notification_severity in ('p0', 'p1'):
+        updated['_trend_notification_severity'] = decision.notification_severity
+    if decision.value is None:
+        return updated
     alert = dict(data['alerts'][0])
     annotations = dict(alert.get('annotations') or {})
     note = f"路由复查指标值: {decision.value:.6g}（{decision.reason}）"
@@ -452,6 +481,44 @@ def with_decision_note(data, decision):
     alert['annotations'] = annotations
     updated['alerts'] = [alert]
     return updated
+
+
+def _latency_decision(decision, expression, labels, threshold, recovery, policy, now):
+    """明确持续/严重影响立即 P0；仅充分证据允许 P1，任何不确定都不降级。"""
+    spec = latency_impact.parse_histogram(expression, labels)
+    minimum = max(policy.min_requests, math.ceil(1 / spec.allowed_ratio))
+    windows = latency_impact.read_windows(spec, labels, now, minimum, _vm_query)
+    level, evidence = latency_impact.impact_level(spec, windows, threshold, recovery, policy.hard_ratio)
+    if level == 'p1':
+        total, errors = latency_impact.response_health(spec, labels, now, minimum, _vm_query)
+        evidence.update(response_total=total, response_errors=errors)
+        if errors > latency_impact.EPSILON:
+            level = None
+    logger.info('event=trend.impact level=%s short_seconds=%s long_seconds=%s metric=%s '
+                'threshold=%s recovery_threshold=%s min_samples=%s evidence=%s',
+                level or 'uncertain', latency_impact.SHORT_SECONDS,
+                latency_impact.LONG_SECONDS, spec.metric, threshold, recovery, minimum,
+                json.dumps(evidence, sort_keys=True))
+    if level == 'p0':
+        reason = (f"短窗口严重超标（超过{policy.hard_ratio:g}倍阈值的观测占比"
+                  f"{evidence['hard_slow_low']:.2%}）" if evidence['severe'] else
+                  f"短长窗口慢观测占比同时超标（{latency_impact.SHORT_SECONDS}秒≥{evidence['short_slow_low']:.2%}，"
+                  f"{latency_impact.LONG_SECONDS}秒≥{evidence['long_slow_low']:.2%}，规则边界{spec.allowed_ratio:.2%}）")
+        return replace(decision, action='send', urgent=True, short_recovered=False,
+                       notification_severity='p0', reason=reason)
+    if level == 'p1':
+        return replace(decision, urgent=False, short_recovered=True,
+                       notification_severity='p1', reason=decision.reason +
+                       f"；短窗口慢观测占比≤{evidence['recovery_slow_high']:.2%}，仅群通知")
+    # 未确认恢复时保留明显恶化/硬上限；观察到期也不凭不足的证据降级。
+    if decision.action == 'send':
+        return replace(decision, urgent=True, notification_severity='p0',
+                       reason=decision.reason + '；当前影响未确认缓解，保留紧急通知')
+    # 长窗口已恢复但短窗口仍不确定，不能据长窗口取消一个新故障。
+    if decision.action == 'cancel':
+        return replace(decision, action='send', urgent=True, notification_severity='p0',
+                       reason='短窗口影响未确认缓解，保留紧急通知')
+    return decision
 
 
 def _short_window_recovered(expression, labels, recovery_threshold, policy, now):
@@ -585,7 +652,16 @@ def decide(data, first_seen, policy=None):
     count = _request_count(labels, request_metric)
     decision = classify(points, threshold, recovery_threshold, count, first_seen, now=now,
                         policy=policy, direction=direction)
-    if direction == 'higher_worse' and decision.action == 'send' and decision.urgent is not None:
+    if Config.TREND_IMPACT_ENABLED and direction == 'higher_worse':
+        # 原序列/计数不足不进入降级路径；失败由调用方立即走原通知规则。
+        if decision.reason != '指标样本不足，按原流程发送':
+            try:
+                decision = _latency_decision(decision, expression, labels, threshold,
+                                             recovery_threshold, policy, now)
+            except Exception as error:
+                logger.warning('event=trend.impact status=fallback rule_uid=%s reason=%s', uid, error)
+                raise
+    elif direction == 'higher_worse' and decision.action == 'send' and decision.urgent is not None:
         try:
             if _short_window_recovered(expression, labels, recovery_threshold, policy, now):
                 decision = replace(decision, urgent=False, short_recovered=True,
@@ -644,8 +720,9 @@ def state_maid(state, group_id):
 
 def log_decision(key, decision):
     """保留每次路由决策，供试点复盘和后续模型评估。日志写入失败不影响发送。"""
-    logger.info('event=trend.decision rule_uid=%s action=%s reason=%s value=%s urgent=%s',
-                key[0], decision.action, decision.reason, decision.value, decision.urgent)
+    logger.info('event=trend.decision rule_uid=%s action=%s reason=%s value=%s urgent=%s severity=%s',
+                key[0], decision.action, decision.reason, decision.value, decision.urgent,
+                decision.notification_severity or 'original')
     try:
         with db_cursor() as (conn, cursor):
             cursor.execute(
@@ -676,7 +753,10 @@ def save_pending(key, config_id, data, first_seen, reason):
             '''INSERT INTO alert_trend_state
                (rule_uid, group_id, fingerprint, config_id, payload, status, first_seen, next_check, reason)
                VALUES (%s,%s,%s,%s,%s,'pending',%s,%s,%s)
-               ON DUPLICATE KEY UPDATE cancel_streak=0, config_id=VALUES(config_id), payload=VALUES(payload),
+               ON DUPLICATE KEY UPDATE cancel_streak=0, config_id=VALUES(config_id),
+                 payload=IF(status!='resolved' AND JSON_EXTRACT(payload, '$._trend_last_notification_severity') IS NOT NULL,
+                   JSON_SET(VALUES(payload), '$._trend_last_notification_severity',
+                     JSON_EXTRACT(payload, '$._trend_last_notification_severity')), VALUES(payload)),
                  first_seen=VALUES(first_seen), next_check=VALUES(next_check), reason=VALUES(reason),
                  last_sent_at=IF(status='resolved', NULL, last_sent_at),
                  `last_value`=IF(status='resolved', NULL, `last_value`), status='pending' ''',
@@ -689,13 +769,18 @@ def save_pending(key, config_id, data, first_seen, reason):
                 key[0], TREND_CHECK_SECONDS, reason)
 
 
-def mark_sent(key, value, reason):
+def mark_sent(key, value, reason, *, notification_severity=None):
+    if notification_severity not in (None, 'p0', 'p1', 'original'):
+        raise ValueError('通知等级无效')
     with db_cursor() as (conn, cursor):
+        grade_sql = ("payload=JSON_SET(payload, '$._trend_last_notification_severity', %s), "
+                     if notification_severity else '')
         _execute_state(cursor,
             "UPDATE alert_trend_state SET cancel_streak=0, status='sent', last_sent_at=UTC_TIMESTAMP(6), "
             "`last_value`=%s, next_check=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL %s SECOND), "
-            "reason=%s WHERE rule_uid=%s AND group_id=%s AND fingerprint=%s",
-            (value, TREND_SENT_CHECK_SECONDS, reason, *key),
+            + grade_sql + "reason=%s WHERE rule_uid=%s AND group_id=%s AND fingerprint=%s",
+            (value, TREND_SENT_CHECK_SECONDS,
+             *((notification_severity,) if notification_severity else ()), reason, *key),
         )
         conn.commit()
     logger.info('event=trend.state.sent rule_uid=%s value=%s reason=%s', key[0], value, reason)

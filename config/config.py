@@ -48,6 +48,7 @@ class Config:
 
     # 指标趋势告警试点。凭据只从运行环境读取，不写入代码或数据库。
     TREND_GATE_ENABLED = os.getenv("TREND_GATE_ENABLED", "false").lower() == "true"
+    TREND_IMPACT_ENABLED = os.getenv("TREND_IMPACT_ENABLED", "false").lower() == "true"
     TREND_RULE_UID = os.getenv("TREND_RULE_UID", "tfk3tpot5p0e3f")
     TREND_GATE_MODE = TREND_GATE_MODE
     TREND_LABEL_MATCHERS = TREND_LABEL_MATCHERS

@@ -116,8 +116,9 @@ def _process_pending_state(key, feishu_client, current, data):
     if current['status'] == 'sent':
         prior = current.get('last_value')
         worsened = (decision.action == 'send'
-                    and trend_gate.is_escalation(decision.value, prior, decision.direction)
-                    and decision.reason != '指标样本不足，按原流程发送')
+                    and (trend_gate.grade_upgrade(decision, current)
+                         or (trend_gate.is_escalation(decision.value, prior, decision.direction)
+                             and decision.reason != '指标样本不足，按原流程发送')))
         if not worsened:
             trend_gate.schedule_next(key, '已通知，持续监测恶化', TREND_SENT_CHECK_SECONDS)
             return
@@ -130,13 +131,14 @@ def _process_pending_state(key, feishu_client, current, data):
             mention_oncall=trend_gate.oncall_mention_policy(decision, prior),
         )
         if response and response.get('message_id'):
-            trend_gate.mark_sent(key, decision.value, decision.reason)
+            trend_gate.mark_sent_decision(key, decision)
         else:
             trend_gate.schedule_next(key, '升级发送失败，等待重试', TREND_SENT_CHECK_SECONDS)
         return
 
     prior = current.get('last_value')
     if (current.get('last_sent_at')
+            and not trend_gate.grade_upgrade(decision, current)
             and trend_gate.is_alleviated(decision.value, prior, decision.direction)):
         trend_gate.restore_sent(key, '升级已缓解，保留原通知')
         return
@@ -163,7 +165,7 @@ def _process_pending_state(key, feishu_client, current, data):
         mention_oncall=trend_gate.oncall_mention_policy(decision, prior),
     )
     if response and response.get('message_id'):
-        trend_gate.mark_sent(key, decision.value, decision.reason)
+        trend_gate.mark_sent_decision(key, decision)
     else:
         trend_gate.schedule_next(key, '发送失败，等待重试')
 

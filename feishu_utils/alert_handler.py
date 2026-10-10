@@ -683,7 +683,9 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
     if state and state['status'] == 'sent':
         prior = state.get('last_value')
         worsened = (decision.action == 'send'
-                    and trend_gate.is_escalation(decision.value, prior, decision.direction))
+                    and (trend_gate.grade_upgrade(decision, state)
+                         or (trend_gate.is_escalation(decision.value, prior, decision.direction)
+                             and decision.reason != '指标样本不足，按原流程发送')))
         if not worsened:
             reason = ('5 分钟内重复投递' if trend_gate.duplicate_sent(state)
                       else '同一轮告警已通知，未明显恶化')
@@ -720,7 +722,7 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
     )
     try:
         if response and response.get('message_id'):
-            trend_gate.mark_sent(key, decision.value, decision.reason)
+            trend_gate.mark_sent_decision(key, decision)
         else:
             trend_gate.schedule_next(key, '发送失败，等待重试')
     except Exception:
@@ -787,7 +789,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
         mentioned_user_list = []
     elif mention_oncall is True and config_row.get('oncall_sync'):
         mentioned_user_list = _get_oncall_mentioned_users(config_row, maid=maid)
-    elif severity_matches:
+    elif severity_matches or mention_oncall is True:
         if config_row.get('oncall_sync'):
             mentioned_user_list = _get_oncall_mentioned_users(config_row, maid=maid)
         else:
@@ -805,6 +807,14 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
 
     # 确定告警级别
     alert_severity = _determine_alert_severity(severities, maid=maid)
+    notification_severity = data.get('_trend_notification_severity')
+    if not is_resolved and not is_phone_alert and notification_severity in ('p0', 'p1'):
+        original_severity = alert_severity
+        alert_severity = notification_severity
+        # 只覆盖展示；原 severity matcher 留在数据库用于正确静默 Grafana 规则。
+        alerts = [f'severity: {alert_severity}' if line.startswith('severity: ') else line
+                  for line in alerts]
+        logger.info('event=alert.grade original=%s notification=%s', original_severity, alert_severity)
 
     # Probe Flashcat before attempting any phone alert. A failed preflight
     # becomes an explicit P0 fallback and skips all phone API calls.
