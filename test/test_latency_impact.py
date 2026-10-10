@@ -58,6 +58,23 @@ class ImpactAlgorithmTests(unittest.TestCase):
     def setUp(self):
         self.spec = impact.parse_histogram(EXPR, LABELS)
 
+    def test_realtime_single_point_query_overrides_vm_latency_offset(self):
+        with patch.object(gate.Config, 'VM_QUERY_URL', 'http://test/api/v1/query_range'), \
+             patch.object(gate, '_request_json', return_value={'data': {'result': []}}) as request:
+            gate._vm_query('metric', start=NOW, end=NOW, step=15)
+            self.assertEqual(request.call_args.kwargs['params'],
+                             {'query': 'metric', 'start': NOW, 'end': NOW, 'step': 15, 'latency_offset': '1ms'})
+            self.assertTrue(request.call_args.args[0].endswith('/api/v1/query_range'))
+
+    def test_normal_range_and_instant_queries_keep_existing_parameters(self):
+        with patch.object(gate.Config, 'VM_QUERY_URL', 'http://test/api/v1/query_range'), \
+             patch.object(gate, '_request_json', return_value={'data': {'result': []}}) as request:
+            gate._vm_query('metric', start=NOW-600, end=NOW, step=15)
+            self.assertNotIn('latency_offset', request.call_args.kwargs['params'])
+            gate._vm_query('metric')
+            self.assertEqual(request.call_args.kwargs['params'], {'query': 'metric'})
+            self.assertTrue(request.call_args.args[0].endswith('/api/v1/query'))
+
     def test_quantile_boundaries_do_not_use_one_global_ratio(self):
         for q, permitted in ((.99, 10), (.95, 50), (.5, 500)):
             spec = replace(self.spec, quantile=q)

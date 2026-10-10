@@ -403,9 +403,14 @@ def _vm_query(query, *, start=None, end=None, step=None):
     if start is None:
         body = _request_json(_vm_url('query'), params={'query': query}, auth=auth)
     else:
+        params = {'query': query, 'start': start, 'end': end, 'step': step}
+        if start == end:
+            # VM 默认查询延迟会把“当前时刻的单点区间”裁为空，不能误判为采集缺失。
+            # 显式单点评估按请求时刻取数；源样本新鲜度、完整性和最小样本量仍由调用方检查。
+            params['latency_offset'] = '1ms'
         body = _request_json(
             _vm_url('query_range'),
-            params={'query': query, 'start': start, 'end': end, 'step': step},
+            params=params,
             auth=auth,
         )
     return body['data']['result']
