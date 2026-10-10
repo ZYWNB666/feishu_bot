@@ -970,6 +970,100 @@ class LogCleanupTests(unittest.TestCase):
 
 
 class TrendFailureTests(unittest.TestCase):
+    @staticmethod
+    def http_error(status):
+        import requests
+        response = requests.Response()
+        response.status_code = status
+        return requests.HTTPError(f'HTTP {status}', response=response)
+
+    def test_rule_404_requires_confirmation_and_does_not_cache_deletion(self):
+        body = {'condition': 'B', 'data': [
+            {'refId': 'A', 'model': {'expr': 'metric'}},
+            {'refId': 'B', 'model': {'type': 'threshold', 'expression': 'A',
+             'conditions': [{'evaluator': {'type': 'gt', 'params': [30]}}]}}]}
+        with patch.object(trend_gate, '_rule_cache', {}), \
+             patch.object(trend_gate, '_request_json', side_effect=[
+                 self.http_error(404), [{'uid': 'other'}], body]) as request:
+            with self.assertRaises(trend_gate.RuleDeletedError):
+                trend_gate._load_rule('deleted')
+            self.assertTrue(request.call_args.args[0].endswith('/api/v1/provisioning/alert-rules'))
+            self.assertNotIn('deleted', trend_gate._rule_cache)
+            # 同 UID 恢复后能立即重新加载，不保存永久负缓存。
+            self.assertEqual(trend_gate._load_rule('deleted'), ('metric', 30, 30, 'higher_worse'))
+
+    def test_404_with_missing_confirmation_does_not_close_rule(self):
+        cases = ([{'uid': 'r'}], [], {'message': 'bad format'}, [{}], RuntimeError('Grafana timeout'))
+        for response in cases:
+            with self.subTest(response=response), patch.object(trend_gate, '_rule_cache', {}), \
+                 patch.object(trend_gate, '_request_json', side_effect=[self.http_error(404), response]):
+                try:
+                    trend_gate._load_rule('r')
+                except trend_gate.RuleDeletedError:
+                    self.fail('未确认删除时不能关闭告警')
+                except Exception:
+                    pass
+                else:
+                    self.fail('应按查询失败交给调用方兜底')
+
+    def test_non_404_http_errors_do_not_attempt_deletion_confirmation(self):
+        for status in (401, 403, 429, 500, 503):
+            error = self.http_error(status)
+            with self.subTest(status=status), patch.object(trend_gate, '_rule_cache', {}), \
+                 patch.object(trend_gate, '_request_json', side_effect=error) as request:
+                with self.assertRaises(type(error)):
+                    trend_gate._load_rule('r')
+                request.assert_called_once()
+
+    def test_confirmed_deleted_rule_closes_pending_and_sent_without_notifying(self):
+        key = ('r', 'g', 'f')
+        data = {'status': 'firing', 'alerts': [{'status': 'firing'}]}
+        for status in ('pending', 'sent'):
+            row = {'config_id': 1, 'status': status, 'first_seen': datetime.now()}
+            with self.subTest(status=status), fake_db(row={'id': 1, 'group_id': 'g'}) as pair, \
+                 patch.object(trend_worker, 'db_cursor') as db, \
+                 patch.object(trend_gate, 'decide', side_effect=trend_gate.RuleDeletedError('r')), \
+                 patch.object(trend_gate, 'mark_resolved') as resolved, \
+                 patch.object(trend_gate, 'log_decision') as log, \
+                 patch.object(trend_gate, 'schedule_next') as schedule, \
+                 patch.object(alert_handler, '_process_single_alert_config') as send:
+                db.return_value.__enter__.return_value = pair
+                trend_worker._process_pending_state(key, object(), row, data)
+            resolved.assert_called_once_with(key, 'Grafana规则已删除，停止后台复查（非指标恢复）')
+            self.assertEqual(log.call_args.args[1].action, 'cancel')
+            send.assert_not_called()
+            schedule.assert_not_called()
+
+    def test_worker_vm_404_and_permission_errors_still_send_pending_alert(self):
+        key = ('r', 'g', 'f')
+        data = {'status': 'firing', 'alerts': [{'status': 'firing'}]}
+        row = {'config_id': 1, 'status': 'pending', 'first_seen': datetime.now()}
+        for status in (404, 403, 500):
+            with self.subTest(status=status), fake_db(row={'id': 1, 'group_id': 'g'}) as pair, \
+                 patch.object(trend_worker, 'db_cursor') as db, \
+                 patch.object(trend_gate, 'decide', side_effect=self.http_error(status)), \
+                 patch.object(trend_gate, 'mark_resolved') as resolved, patch.object(trend_gate, 'log_decision'), \
+                 patch.object(trend_gate, 'mark_sent_decision') as sent, \
+                 patch.object(alert_handler, '_process_single_alert_config', return_value={'message_id': 'm'}) as send:
+                db.return_value.__enter__.return_value = pair
+                trend_worker._process_pending_state(key, object(), row, data)
+            resolved.assert_not_called()
+            send.assert_called_once()
+            self.assertIsNone(send.call_args.kwargs['mention_oncall'])
+            sent.assert_called_once()
+
+    def test_new_webhook_for_missing_rule_keeps_original_delivery(self):
+        key = ('r', 'g', 'f')
+        data = {'status': 'firing', 'alerts': [{'status': 'firing'}]}
+        with patch.object(trend_gate, 'get_state', return_value=None), \
+             patch.object(trend_gate, 'decide', side_effect=trend_gate.RuleDeletedError('r')), \
+             patch.object(trend_gate, 'log_decision'), patch.object(trend_gate, 'save_pending'), \
+             patch.object(trend_gate, 'mark_sent_decision'), patch.object(trend_gate, 'mark_resolved') as resolved, \
+             patch.object(alert_handler, '_process_single_alert_config', return_value={'message_id': 'm'}) as send:
+            alert_handler._process_trend_config(data, {'id': 1, 'group_id': 'g'}, 'a', object(), key)
+        resolved.assert_not_called()
+        send.assert_called_once()
+
     def test_http_metric_query_failure_still_sends(self):
         key = ('r', 'g', 'f')
         data = {'status': 'firing', 'alerts': [{'status': 'firing'}]}

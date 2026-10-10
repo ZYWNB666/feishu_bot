@@ -108,6 +108,14 @@ def _process_pending_state(key, feishu_client, current, data):
             decision = trend_gate.decide(
                 data, current['first_seen'].replace(tzinfo=timezone.utc).timestamp(), policy
             )
+    except trend_gate.RuleDeletedError:
+        reason = 'Grafana规则已删除，停止后台复查（非指标恢复）'
+        # 仅后台关闭旧观察记录；不发恢复卡片，不修改原告警/静默记录。
+        trend_gate.mark_resolved(key, reason)
+        trend_gate.log_decision(key, trend_gate.Decision('cancel', None, reason))
+        logger.warning('event=trend.rule.deleted rule_uid=%s previous_state=%s action=stop_recheck',
+                       key[0], current['status'])
+        return
     except Exception:
         logger.exception("待观察告警指标查询失败，按原流程发送: %s", key)
         decision = trend_gate.Decision('send', None, '指标查询失败，按原流程发送')

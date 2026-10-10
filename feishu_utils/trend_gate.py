@@ -40,6 +40,10 @@ _legacy_warning_emitted = False
 _legacy_override_warning_emitted = False
 
 
+class RuleDeletedError(ValueError):
+    """单条规则 404 且完整规则列表确认不存在；不表示业务指标恢复。"""
+
+
 @dataclass(frozen=True)
 class TrendPolicy:
     rule_uids: tuple[str, ...] = ()
@@ -368,7 +372,22 @@ def _load_rule(uid):
 
     url = f"{Config.GRAFANA_API_URL.rstrip('/')}/api/v1/provisioning/alert-rules/{quote(uid, safe='')}"
     read_key = Config.GRAFANA_RULES_READ_KEY or Config.GRAFANA_API_KEY
-    body = _request_json(url, headers={'Authorization': f'Bearer {read_key}'})
+    headers = {'Authorization': f'Bearer {read_key}'}
+    try:
+        body = _request_json(url, headers=headers)
+    except requests.HTTPError as error:
+        if error.response is None or error.response.status_code != 404:
+            raise
+        rules = _request_json(f"{Config.GRAFANA_API_URL.rstrip('/')}/api/v1/provisioning/alert-rules",
+                              headers=headers)
+        # 空列表也可能是组织/权限配置变化，不能据此批量关闭全部告警。
+        if (not isinstance(rules, list) or not rules
+                or any(not isinstance(rule, dict) or not isinstance(rule.get('uid'), str)
+                       or not rule['uid'] for rule in rules)):
+            raise ValueError('Grafana 规则列表不完整，无法确认规则删除') from error
+        if any(rule['uid'] == uid for rule in rules):
+            raise
+        raise RuleDeletedError(f'Grafana 规则已删除: {uid}') from error
     condition = next(x for x in body['data'] if x['refId'] == body['condition'])
     model = condition['model']
     if model.get('type') != 'threshold':
