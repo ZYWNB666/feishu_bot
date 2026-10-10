@@ -214,6 +214,76 @@ class ImpactAlgorithmTests(unittest.TestCase):
                                             30, 30, gate.TrendPolicy(), NOW)
             self.assertEqual(result.action, 'observe')
 
+    def test_aacc_alert_short_spike_is_p1_and_not_recovered(self):
+        # MAID aacc05edaef2a307e7e5 的实际计数：短窗口8/391，长窗口9/1226。
+        windows = {90: window(8, 391), 300: window(9, 1226)}
+        baseline = gate.Decision('send', 38.3697, '达到最长观察时间且仍越线', urgent=False)
+        with patch.object(impact, 'read_windows', return_value=windows), \
+             patch.object(impact, 'response_health', return_value=(393, 0)):
+            result = gate._latency_decision(baseline, EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+        self.assertEqual((result.action, result.notification_severity, result.urgent), ('send', 'p1', False))
+        self.assertFalse(result.short_recovered)
+        self.assertFalse(gate.oncall_mention_policy(result))
+        self.assertIn('继续监测', result.reason)
+
+    def test_short_only_spike_respects_observation_and_cannot_cancel(self):
+        windows = {90: window(20), 300: window(20, 3000)}
+        with patch.object(impact, 'read_windows', return_value=windows), \
+             patch.object(impact, 'response_health', return_value=(1000, 0)):
+            for original, expected in (('observe', 'observe'), ('send', 'send'), ('cancel', 'send')):
+                with self.subTest(original=original):
+                    result = gate._latency_decision(gate.Decision(original, 29, '原窗口判断'),
+                                                    EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+                    self.assertEqual((result.action, result.notification_severity), (expected, 'p1'))
+                    self.assertFalse(result.short_recovered)
+                    self.assertNotIn('恢复', result.reason)
+
+    def test_short_only_spike_uses_quantile_boundary_for_ttft_and_tpot(self):
+        for q, slow in ((.99, 20), (.95, 60), (.5, 600)):
+            for metric in ('ttft', 'tpot'):
+                expr = EXPR.replace('0.99', str(q)).replace('ttft', metric)
+                spec = impact.parse_histogram(expr, LABELS)
+                level, evidence = impact.impact_level(spec, {90: window(slow), 300: window(slow, 3000)},
+                                                       30, 30, 2.5)
+                with self.subTest(q=q, metric=metric):
+                    self.assertEqual(level, 'p1')
+                    self.assertTrue(evidence['transient'])
+                    self.assertFalse(evidence['recovered'])
+
+    def test_short_only_spike_does_not_guess_long_or_severe_bounds(self):
+        long = window(40, 3000)
+        # 35s 不在桶上；长窗口真实超标比例可能位于0～1.33%，不能判为正常。
+        short = window(20, severe=20)
+        self.assertIsNone(impact.impact_level(self.spec, {90: short, 300: long}, 35, 30, 2.5)[0])
+        short = window(20, severe=20)
+        del short.counts[75000]
+        # 75s 不在桶上，严重慢观测占比可能0～2%，不能判为非紧急。
+        self.assertIsNone(impact.impact_level(self.spec, {90: short, 300: window(20, 3000)},
+                                            30, 30, 2.5)[0])
+
+    def test_short_only_spike_long_boundary_and_p0_priority(self):
+        for long_slow, severe, expected in ((30, 0, 'p1'), (31, 0, 'p0'), (20, 11, 'p0')):
+            with self.subTest(long_slow=long_slow, severe=severe):
+                level, _ = impact.impact_level(self.spec,
+                    {90: window(20, severe=severe), 300: window(long_slow, 3000, severe=severe)},
+                    30, 30, 2.5)
+                self.assertEqual(level, expected)
+
+    def test_short_only_spike_response_errors_keep_p0_and_missing_evidence_fails(self):
+        windows = {90: window(20), 300: window(20, 3000)}
+        with patch.object(impact, 'read_windows', return_value=windows):
+            for code in ('500', '408'):
+                with self.subTest(code=code), patch.object(gate, '_vm_query',
+                        return_value=responses({'200': 393, code: 1})):
+                    result = gate._latency_decision(gate.Decision('send', 38, '观察到期'),
+                                                    EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+                    self.assertEqual(result.notification_severity, 'p0')
+            for rows in ([], responses({'200': 99}), responses({'unknown': 393})):
+                with self.subTest(rows=rows), patch.object(gate, '_vm_query', return_value=rows), \
+                     self.assertRaises(ValueError):
+                    gate._latency_decision(gate.Decision('send', 38, '观察到期'),
+                                          EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+
 
 class NotificationTests(unittest.TestCase):
     def setUp(self):
@@ -238,6 +308,35 @@ class NotificationTests(unittest.TestCase):
         self.assertFalse(gate.grade_upgrade(replace(self.p0, action='observe'), self.state))
         state = dict(self.state, payload=dict(self.data, _trend_last_notification_severity='p0'))
         self.assertFalse(gate.grade_upgrade(self.p0, state))
+
+    def test_sent_p1_short_spike_continues_monitoring_without_grade_upgrade(self):
+        with patch.object(impact, 'read_windows', return_value={90: window(8, 391), 300: window(9, 1226)}), \
+             patch.object(impact, 'response_health', return_value=(393, 0)):
+            decision = gate._latency_decision(gate.Decision('send', 38.3697, '观察到期'),
+                                              EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+        with patch.object(trend_worker, 'db_cursor') as db, patch.object(gate, 'decide', return_value=decision), \
+             patch.object(gate, 'log_decision'), patch.object(gate, 'schedule_next') as schedule, \
+             patch.object(gate, 'mark_sent_decision') as mark, \
+             patch.object(alert_handler, '_process_single_alert_config') as send:
+            db.return_value.__enter__.return_value = (MagicMock(), MagicMock(fetchone=lambda: self.route))
+            trend_worker._process_pending_state(self.key, gate.TrendPolicy(), self.state, self.data)
+            send.assert_not_called()
+            mark.assert_not_called()
+            schedule.assert_called_once()
+
+    def test_transient_p1_later_sustained_or_query_failure_still_upgrades(self):
+        baseline = gate.Decision('send', 38.3697, '观察到期')
+        with patch.object(impact, 'read_windows') as read, \
+             patch.object(impact, 'response_health', return_value=(393, 0)):
+            read.return_value = {90: window(8, 391), 300: window(9, 1226)}
+            mild = gate._latency_decision(baseline, EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+            self.assertFalse(gate.grade_upgrade(mild, self.state))
+            read.return_value = {90: window(8, 391), 300: window(14, 1226)}
+            severe = gate._latency_decision(baseline, EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+            self.assertEqual((severe.action, severe.notification_severity, severe.urgent), ('send', 'p0', True))
+            self.assertTrue(gate.grade_upgrade(severe, self.state))
+            self.assertTrue(gate.oncall_mention_policy(severe))
+            self.assertTrue(gate.grade_upgrade(gate.Decision('send', None, '查询失败'), self.state))
 
     def test_http_p1_to_p0_sends_once_without_increase(self):
         with patch.object(gate, 'get_state', return_value=self.state), \

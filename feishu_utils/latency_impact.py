@@ -165,17 +165,23 @@ def impact_level(spec, windows, threshold, recovery_threshold, hard_ratio):
     short_low, short_high = short.slow_bounds(raw_threshold)
     long_low, long_high = long.slow_bounds(raw_threshold)
     _, recovery_high = short.slow_bounds(raw_recovery)
-    hard_low, _ = short.slow_bounds(raw_threshold * hard_ratio)
+    hard_low, hard_high = short.slow_bounds(raw_threshold * hard_ratio)
     allowed = spec.allowed_ratio
     # 用计数比较消除 1-0.99 的浮点边界误差。
     severe = hard_low * short.total > allowed * short.total + EPSILON
     sustained = (short_low * short.total > allowed * short.total + EPSILON
                  and long_low * long.total > allowed * long.total + EPSILON)
     recovered = recovery_high * short.total <= allowed * short.total + EPSILON
-    level = 'p0' if severe or sustained else 'p1' if recovered else None
+    # 仅短窗口确实越线，且长窗口与严重慢观测的上界均正常，才允许普通通知。
+    # 使用上界证明非紧急，桶边界不明确时仍保留紧急兜底。
+    transient = (short_low * short.total > allowed * short.total + EPSILON
+                 and long_high * long.total <= allowed * long.total + EPSILON
+                 and hard_high * short.total <= allowed * short.total + EPSILON)
+    level = 'p0' if severe or sustained else 'p1' if recovered or transient else None
     return level, {'quantile': spec.quantile, 'allowed_ratio': allowed,
                    'short_total': short.total, 'long_total': long.total,
                    'short_slow_low': short_low, 'short_slow_high': short_high,
                    'long_slow_low': long_low, 'long_slow_high': long_high,
                    'recovery_slow_high': recovery_high, 'hard_slow_low': hard_low,
+                   'hard_slow_high': hard_high, 'recovered': recovered, 'transient': transient,
                    'severe': severe, 'sustained': sustained}

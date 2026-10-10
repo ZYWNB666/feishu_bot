@@ -533,6 +533,13 @@ def _latency_decision(decision, expression, labels, threshold, recovery, policy,
         return replace(decision, action='send', urgent=True, short_recovered=False,
                        notification_severity='p0', reason=reason)
     if level == 'p1':
+        if evidence['transient']:
+            # 短窗口仍越线，不把普通级别误当恢复；长窗口 cancel 也须发普通通知。
+            reason = ('短窗口仍越线' if decision.action == 'cancel' else decision.reason)
+            return replace(decision, action='send' if decision.action == 'cancel' else decision.action,
+                           urgent=False, short_recovered=False, notification_severity='p1',
+                           reason=reason + f"；短窗口慢观测占比≥{evidence['short_slow_low']:.2%}，"
+                           f"长窗口≤{evidence['long_slow_high']:.2%}，响应正常，仅群通知并继续监测")
         return replace(decision, urgent=False, short_recovered=True,
                        notification_severity='p1', reason=decision.reason +
                        f"；短窗口慢观测占比≤{evidence['recovery_slow_high']:.2%}，仅群通知")
