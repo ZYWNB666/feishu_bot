@@ -518,10 +518,12 @@ def _latency_decision(decision, expression, labels, threshold, recovery, policy,
         evidence.update(response_total=total, response_errors=errors)
         if errors > latency_impact.EPSILON:
             level = None
-    logger.info('event=trend.impact level=%s short_seconds=%s long_seconds=%s metric=%s '
+    logger.info('event=trend.impact level=%s short_seconds=%s long_seconds=%s snapshot_time=%.3f '
+                'snapshot_lag_seconds=%s metric=%s '
                 'threshold=%s recovery_threshold=%s min_samples=%s evidence=%s',
                 level or 'uncertain', latency_impact.SHORT_SECONDS,
-                latency_impact.LONG_SECONDS, spec.metric, threshold, recovery, minimum,
+                latency_impact.LONG_SECONDS, now - latency_impact.SNAPSHOT_LAG_SECONDS,
+                latency_impact.SNAPSHOT_LAG_SECONDS, spec.metric, threshold, recovery, minimum,
                 json.dumps(evidence, sort_keys=True))
     if level == 'p0':
         reason = (f"短窗口严重超标（超过{policy.hard_ratio:g}倍阈值的观测占比"
@@ -683,7 +685,10 @@ def decide(data, first_seen, policy=None):
                 decision = _latency_decision(decision, expression, labels, threshold,
                                              recovery_threshold, policy, now)
             except Exception as error:
-                logger.warning('event=trend.impact status=fallback rule_uid=%s reason=%s', uid, error)
+                logger.warning('event=trend.impact status=fallback rule_uid=%s snapshot_time=%.3f '
+                               'snapshot_lag_seconds=%s reason=%s', uid,
+                               now - latency_impact.SNAPSHOT_LAG_SECONDS,
+                               latency_impact.SNAPSHOT_LAG_SECONDS, error)
                 raise
     elif direction == 'higher_worse' and decision.action == 'send' and decision.urgent is not None:
         try:

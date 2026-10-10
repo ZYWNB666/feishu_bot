@@ -7,6 +7,8 @@ from config.constants import TREND_IMPACT_SHORT_SECONDS, TREND_IMPACT_LONG_SECON
 
 SHORT_SECONDS = TREND_IMPACT_SHORT_SECONDS
 LONG_SECONDS = TREND_IMPACT_LONG_SECONDS
+# 避开 VM 最新采集尚未全部可见的区间；窗口宽度和观察期限保持原值。
+SNAPSHOT_LAG_SECONDS = 30
 EPSILON = 1e-6
 
 
@@ -76,6 +78,7 @@ def read_windows(spec, labels, now, min_samples, query, windows=(SHORT_SECONDS, 
     if not 15 <= SHORT_SECONDS < LONG_SECONDS:
         raise ValueError('影响判断窗口必须满足 15秒≤短窗口<长窗口')
     grouping = ','.join(spec.groups)
+    snapshot_time = now - SNAPSHOT_LAG_SECONDS
     parts = []
     for seconds in windows:
         # 对源样本检查新鲜度；遇到 counter 重置保守回退，不据此降低等级。
@@ -83,7 +86,7 @@ def read_windows(spec, labels, now, min_samples, query, windows=(SHORT_SECONDS, 
                       f'and (min by({grouping})(timestamp({spec.source})) >= {now - 45}) '
                       f'and (sum by({grouping})(resets({spec.source}[{max(windows)}s])) == 0)')
         parts.append(f'label_replace(({expression}), "impact_window", "{seconds}", "", "")')
-    results = query(' or '.join(parts), start=now, end=now, step=15)
+    results = query(' or '.join(parts), start=snapshot_time, end=snapshot_time, step=15)
     dimensions = {key: labels[key] for key in ('tenant', 'model', 'ep') if labels.get(key)}
     buckets = {seconds: {} for seconds in windows}
     for series in results:
@@ -97,7 +100,7 @@ def read_windows(spec, labels, now, min_samples, query, windows=(SHORT_SECONDS, 
         timestamp, value = values[0]
         boundary, count = float(metric['le']), float(value)
         if (boundary in buckets[seconds] or math.isnan(boundary) or boundary < 0
-                or not math.isfinite(count) or count < 0 or abs(float(timestamp) - now) > 5):
+                or not math.isfinite(count) or count < 0 or abs(float(timestamp) - snapshot_time) > 5):
             raise ValueError('延迟桶数据无效或匹配不唯一')
         buckets[seconds][boundary] = count
     parsed = {}
@@ -106,8 +109,10 @@ def read_windows(spec, labels, now, min_samples, query, windows=(SHORT_SECONDS, 
         if total is None or total <= 0 or total < min_samples:
             raise ValueError(f'{seconds}秒窗口观测不足或缺少总量桶')
         ordered = sorted(counts)
-        if any(counts[b] + EPSILON < counts[a] for a, b in zip(ordered, ordered[1:])):
-            raise ValueError('累计桶计数不一致')
+        for a, b in zip(ordered, ordered[1:]):
+            if counts[b] + EPSILON < counts[a]:
+                raise ValueError(f'{seconds}秒累计桶计数不一致: '
+                                 f'le={a:g} count={counts[a]:g}, le={b:g} count={counts[b]:g}')
         parsed[seconds] = HistogramWindow(counts)
     if len(windows) > 1:
         short, long = parsed[min(windows)], parsed[max(windows)]
@@ -120,11 +125,12 @@ def read_windows(spec, labels, now, min_samples, query, windows=(SHORT_SECONDS, 
 def response_health(spec, labels, now, min_samples, query):
     """降级前确认最近仍有响应且未观测到服务端错误/超时，不推断在途请求。"""
     grouping = ','.join((*[name for name in spec.groups if name != 'le'], 'code'))
+    snapshot_time = now - SNAPSHOT_LAG_SECONDS
     source = 'magik_model_response_total{' + spec.selector + '}'
     expression = (f'sum by({grouping})(increase({source}[{SHORT_SECONDS}s])) '
                   f'and (min by({grouping})(timestamp({source})) >= {now - 45}) '
                   f'and (sum by({grouping})(resets({source}[{SHORT_SECONDS}s])) == 0)')
-    results = query(expression, start=now, end=now, step=15)
+    results = query(expression, start=snapshot_time, end=snapshot_time, step=15)
     dimensions = {key: labels[key] for key in ('tenant', 'model', 'ep') if labels.get(key)}
     counts = {}
     for series in results:
@@ -137,7 +143,7 @@ def response_health(spec, labels, now, min_samples, query):
             raise ValueError('响应状态码或匹配不唯一')
         timestamp, value = values[0]
         count = float(value)
-        if not math.isfinite(count) or count < 0 or abs(float(timestamp) - now) > 5:
+        if not math.isfinite(count) or count < 0 or abs(float(timestamp) - snapshot_time) > 5:
             raise ValueError('响应计数无效')
         counts[code] = count
     total = sum(counts.values())

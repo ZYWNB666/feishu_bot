@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from feishu_utils import latency_impact as impact, trend_gate as gate, alert_handler, trend_worker
 
 NOW = 1000
+SNAPSHOT_TIME = NOW - impact.SNAPSHOT_LAG_SECONDS
 LABELS = {'tenant': 't', 'model': 'm'}
 EXPR = 'histogram_quantile(0.99, sum by(model, le, tenant)(rate(magik_model_ttft_ms_bucket{tenant="t",model="m"}[10m]))) / 1000'
 
@@ -29,12 +30,12 @@ def window(slow, total=1000, severe=0):
 
 def matrix(windows):
     return [{'metric': dict(LABELS, le=str(le), impact_window=str(seconds)),
-             'values': [[NOW, str(n)]]}
+             'values': [[SNAPSHOT_TIME, str(n)]]}
             for seconds, data in windows.items() for le, n in data.counts.items()]
 
 
 def responses(code_counts):
-    return [{'metric': dict(LABELS, code=code), 'values': [[NOW, str(n)]]}
+    return [{'metric': dict(LABELS, code=code), 'values': [[SNAPSHOT_TIME, str(n)]]}
             for code, n in code_counts.items()]
 
 
@@ -122,7 +123,36 @@ class ImpactAlgorithmTests(unittest.TestCase):
         self.assertIn('tenant="t",model="m"', text)
         self.assertIn('timestamp(', text)
         self.assertIn('resets(', text)
-        self.assertEqual(query.call_args.kwargs, {'start': NOW, 'end': NOW, 'step': 15})
+        self.assertEqual(query.call_args.kwargs, {'start': SNAPSHOT_TIME, 'end': SNAPSHOT_TIME, 'step': 15})
+
+    def test_histogram_and_response_share_settled_snapshot_with_wall_clock_freshness(self):
+        histogram_query = MagicMock(return_value=matrix({90: window(0), 300: window(0)}))
+        response_query = MagicMock(return_value=responses({'200': 1000}))
+        impact.read_windows(self.spec, LABELS, NOW, 100, histogram_query)
+        impact.response_health(self.spec, LABELS, NOW, 100, response_query)
+        self.assertEqual(impact.SNAPSHOT_LAG_SECONDS, 30)
+        for query in (histogram_query, response_query):
+            self.assertEqual(query.call_args.kwargs,
+                             {'start': NOW-30, 'end': NOW-30, 'step': 15})
+            # 新鲜度仍以决策时刻计算，不能因快照后移放宽到 75 秒。
+            self.assertIn(f'>= {NOW-45}', query.call_args.args[0])
+
+    def test_partial_latest_buckets_do_not_enter_settled_snapshot(self):
+        valid = matrix({90: window(0), 300: window(0)})
+        partial = json.loads(json.dumps(valid))
+        partial[0]['values'][0][1] = '2000'
+        for row in partial:
+            row['values'][0][0] = NOW
+        query = MagicMock(side_effect=lambda expr, **kw:
+                          valid if kw['start'] == NOW-30 else partial)
+        windows = impact.read_windows(self.spec, LABELS, NOW, 100, query)
+        self.assertEqual(impact.impact_level(self.spec, windows, 30, 30, 2.5)[0], 'p1')
+
+    def test_settled_snapshot_inversion_remains_failure_with_bucket_details(self):
+        rows = matrix({90: window(0), 300: window(0)})
+        rows[0]['values'][0][1] = '1001'
+        with self.assertRaisesRegex(ValueError, '90秒累计桶计数不一致: le=10000 count=1001, le=25000 count=1000'):
+            impact.read_windows(self.spec, LABELS, NOW, 100, MagicMock(return_value=rows))
 
     def test_unsupported_expressions_and_dimensions_fail_closed_to_downgrade(self):
         for expr, labels in ((EXPR+' + 1', LABELS), (EXPR, dict(LABELS, ep='other')),
