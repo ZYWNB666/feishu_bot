@@ -79,17 +79,107 @@ class ImpactAlgorithmTests(unittest.TestCase):
     def test_quantile_boundaries_do_not_use_one_global_ratio(self):
         for q, permitted in ((.99, 10), (.95, 50), (.5, 500)):
             spec = replace(self.spec, quantile=q)
-            for slow, expected in ((permitted-1, 'p1'), (permitted, 'p1'), (permitted+1, 'p0')):
+            for slow, expected in ((permitted-1, 'p1'), (permitted, 'p1'),
+                                   (permitted+1, 'p1'), (min(permitted*4, 1000), 'p0')):
                 with self.subTest(q=q, slow=slow):
-                    windows = {90: window(slow), 300: window(slow)}
+                    windows = {90: window(slow), 300: window(slow*3, 3000)}
                     self.assertEqual(impact.impact_level(spec, windows, 30, 30, 2.5)[0], expected)
 
     def test_sustained_plateau_is_urgent_without_growth(self):
-        windows = {90: window(20), 300: window(60, 3000)}
+        windows = {90: window(100), 300: window(300, 3000)}
         decision = gate.Decision('observe', 31, '稳定超标')
         with patch.object(impact, 'read_windows', return_value=windows):
             result = gate._latency_decision(decision, EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
         self.assertEqual((result.action, result.notification_severity, result.urgent), ('send', 'p0', True))
+
+    def test_wilson_lower_bound_matches_reference_and_extremes(self):
+        # NIST 的单侧95%示例：26/200 的下限约9.577%。
+        self.assertAlmostEqual(impact.slow_ratio_lower_bound(.13, 200), .09577, places=5)
+        self.assertEqual(impact.slow_ratio_lower_bound(0, 100), 0)
+        self.assertEqual(impact.slow_ratio_lower_bound(-1e-12, 100), 0)
+        self.assertGreater(impact.slow_ratio_lower_bound(1, 20), .5)
+        self.assertLess(impact.slow_ratio_lower_bound(.02, 100),
+                        impact.slow_ratio_lower_bound(.02, 10000))
+
+    def test_overnight_borderline_sustained_is_p1_and_keeps_monitoring(self):
+        # 昨晚实际计数，阈值边界附近的几个观测不能直接触发 P0。
+        for q, short_slow, short_n, long_slow, long_n in (
+                (.99, 5, 294, 16, 977), (.5, 135, 209, 402, 788),
+                (.95, 3, 47, 10, 187), (.5, 27, 46, 98, 173)):
+            expr = EXPR.replace('0.99', str(q))
+            windows = {90: window(short_slow, short_n), 300: window(long_slow, long_n)}
+            with self.subTest(q=q, short_n=short_n), \
+                 patch.object(impact, 'read_windows', return_value=windows), \
+                 patch.object(impact, 'response_health', return_value=(1000, 0)):
+                d = gate._latency_decision(gate.Decision('send', 31, '观察到期'),
+                                          expr, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+                self.assertEqual((d.action, d.notification_severity, d.urgent), ('send', 'p1', False))
+                self.assertFalse(d.short_recovered)
+                self.assertIn('样本', d.reason)
+
+    def test_borderline_severity_cannot_downgrade_unknown_hard_bounds(self):
+        short, long = window(11, severe=11), window(31, 3000, severe=11)
+        del short.counts[75000]
+        del long.counts[75000]
+        level, _ = impact.impact_level(self.spec, {90: short, 300: long}, 30, 30, 2.5)
+        self.assertIsNone(level)
+
+    def test_borderline_still_notifies_by_original_observation_deadline(self):
+        policy = gate.TrendPolicy()
+        windows = {90: window(5, 294), 300: window(16, 977)}
+        with patch.object(impact, 'read_windows', return_value=windows), \
+             patch.object(impact, 'response_health', return_value=(279, 0)):
+            for elapsed, expected in ((179, 'observe'), (180, 'send')):
+                with self.subTest(elapsed=elapsed):
+                    baseline = gate.classify([(t, 31) for t in range(20, 201, 15)],
+                                             30, 30, 100, first_seen=200-elapsed, now=200,
+                                             policy=policy)
+                    d = gate._latency_decision(baseline, EXPR, LABELS, 30, 30, policy, NOW)
+                    self.assertEqual((d.action, d.notification_severity), (expected, 'p1'))
+
+    def test_borderline_response_errors_and_missing_evidence_keep_safety_fallback(self):
+        windows = {90: window(5, 294), 300: window(16, 977)}
+        with patch.object(impact, 'read_windows', return_value=windows):
+            with patch.object(impact, 'response_health', return_value=(279, 1)):
+                d = gate._latency_decision(gate.Decision('send', 31, '观察到期'),
+                                          EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+                self.assertEqual((d.action, d.notification_severity), ('send', 'p0'))
+            with patch.object(impact, 'response_health', side_effect=ValueError('样本不足')):
+                with self.assertRaises(ValueError):
+                    gate._latency_decision(gate.Decision('send', 31, '观察到期'),
+                                          EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+
+    def test_overnight_major_tpot_deterioration_still_p0_without_waiting(self):
+        windows = {90: window(57, 57), 300: window(154, 163)}
+        with patch.object(impact, 'read_windows', return_value=windows), \
+             patch.object(impact, 'response_health', side_effect=AssertionError('P0不需响应降级证据')):
+            d = gate._latency_decision(gate.Decision('observe', 43.75, '尚在观察'),
+                                      EXPR.replace('0.99', '0.5').replace('ttft', 'tpot'),
+                                      LABELS, 30, 30, gate.TrendPolicy(), NOW)
+            self.assertEqual((d.action, d.notification_severity, d.urgent), ('send', 'p0', True))
+
+    def test_overnight_short_bucket_ambiguity_with_healthy_long_window_is_p1(self):
+        short = impact.HistogramWindow({30000: 218, 50000: 220, 100000: 220, math.inf: 221})
+        long = impact.HistogramWindow({30000: 736, 50000: 738, 100000: 738, math.inf: 739})
+        level, evidence = impact.impact_level(self.spec, {90: short, 300: long}, 35, 30, 2.5)
+        self.assertEqual(level, 'p1')
+        self.assertTrue(evidence['transient'])
+        self.assertFalse(evidence['recovered'])
+        self.assertLess(evidence['short_slow_low'], .01)
+        self.assertGreater(evidence['short_slow_high'], .01)
+
+    def test_trigger_healthy_recovery_unconfirmed_is_p1_but_not_resolved(self):
+        short, long = window(0), window(0, 3000)
+        short.counts[25000], long.counts[25000] = 980, 2940
+        with patch.object(impact, 'read_windows', return_value={90: short, 300: long}), \
+             patch.object(impact, 'response_health', return_value=(1000, 0)):
+            for action in ('send', 'cancel', 'observe'):
+                with self.subTest(action=action):
+                    d = gate._latency_decision(gate.Decision(action, 28, '处于恢复区间'),
+                                              EXPR, LABELS, 30, 25, gate.TrendPolicy(), NOW)
+                    self.assertEqual((d.action, d.notification_severity),
+                                     ('observe' if action == 'observe' else 'send', 'p1'))
+                    self.assertFalse(d.short_recovered)
 
     def test_short_severe_window_does_not_wait_for_long_window(self):
         windows = {90: window(20, severe=11), 300: window(20, 10000, severe=11)}
@@ -97,6 +187,12 @@ class ImpactAlgorithmTests(unittest.TestCase):
         self.assertEqual(level, 'p0')
         self.assertTrue(evidence['severe'])
         self.assertFalse(evidence['sustained'])
+        # 11/1000 的严重尾部无需通过样本量缓冲，任何阶段立即升级。
+        with patch.object(impact, 'read_windows', return_value=windows), \
+             patch.object(impact, 'response_health', side_effect=AssertionError('严重超标不等待降级证据')):
+            result = gate._latency_decision(gate.Decision('observe', 31, '刚开始观察'),
+                                           EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+            self.assertEqual((result.action, result.notification_severity, result.urgent), ('send', 'p0', True))
 
     def test_rare_spikes_and_historical_residue_allow_p1(self):
         for slow in (0, 5, 10):
@@ -105,13 +201,20 @@ class ImpactAlgorithmTests(unittest.TestCase):
 
     def test_bucket_bounds_do_not_guess_unknown_distribution(self):
         self.assertEqual(window(15).slow_bounds(35000), (0, .015))
-        self.assertIsNone(impact.impact_level(self.spec, {90: window(15), 300: window(15)}, 35, 30, 2.5)[0])
+        level, evidence = impact.impact_level(self.spec, {90: window(15), 300: window(15)}, 35, 30, 2.5)
+        self.assertEqual(level, 'p1')
+        self.assertTrue(evidence['uncertain_nonsevere'])
+        self.assertFalse(evidence['recovered'])
+        self.assertEqual((evidence['short_slow_low'], evidence['short_slow_high']), (0, .015))
 
     def test_recovery_threshold_is_stricter_than_trigger(self):
         # All but one observation is <=30s, but 20 observations still exceed 25s.
         w = window(0)
         w.counts[25000] = 980
-        self.assertIsNone(impact.impact_level(self.spec, {90: w, 300: w}, 30, 25, 2.5)[0])
+        level, evidence = impact.impact_level(self.spec, {90: w, 300: w}, 30, 25, 2.5)
+        self.assertEqual(level, 'p1')
+        self.assertTrue(evidence['below_trigger'])
+        self.assertFalse(evidence['recovered'])
 
     def test_units_and_selector_are_preserved(self):
         self.assertEqual(self.spec.divisor, 1000)
@@ -187,6 +290,62 @@ class ImpactAlgorithmTests(unittest.TestCase):
                 result = gate._latency_decision(baseline, EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
                 self.assertEqual(result.notification_severity, expected)
 
+    def test_sparse_response_errors_do_not_force_latency_p0(self):
+        windows = {90: window(0), 300: window(0)}
+        baseline = gate.Decision('send', 45.4333, '原窗口超标', urgent=True)
+        for code in ('500', '408'):
+            for success, errors, grade in ((3146, 3, 'p1'), (999, 1, 'p1'),
+                                           (998, 2, 'p0'), (0, 1000, None)):
+                with self.subTest(code=code, success=success, errors=errors), \
+                     patch.object(impact, 'read_windows', return_value=windows), \
+                     patch.object(gate, '_vm_query', return_value=responses({'200': success, code: errors})):
+                    if grade is None:
+                        with self.assertRaises(ValueError):
+                            gate._latency_decision(baseline, EXPR, LABELS, 60, 60, gate.TrendPolicy(), NOW)
+                    else:
+                        d = gate._latency_decision(baseline, EXPR, LABELS, 60, 60, gate.TrendPolicy(), NOW)
+                        self.assertEqual(d.notification_severity, grade)
+
+    def test_error_ratio_limit_can_restore_strict_behavior_and_reject_invalid_limits(self):
+        windows = {90: window(0), 300: window(0)}
+        with patch.object(impact, 'read_windows', return_value=windows), \
+             patch.object(impact, 'response_health', return_value=(3149, 3)):
+            with patch.object(impact, 'MAX_ERROR_RATIO', 0):
+                d = gate._latency_decision(gate.Decision('send', 40, '越线'),
+                                          EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+                self.assertEqual(d.notification_severity, 'p0')
+            for limit in (-.001, 1.1, float('nan'), float('inf')):
+                with self.subTest(limit=limit), patch.object(impact, 'MAX_ERROR_RATIO', limit):
+                    with self.assertRaises(ValueError):
+                        gate._latency_decision(gate.Decision('send', 40, '越线'),
+                                              EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+
+    def test_valid_bucket_ambiguity_needs_healthy_responses_to_send_p1(self):
+        # 35秒阈值夹在30/50秒桶之间，无法确认越线；87.5秒严重尾部上界为0。
+        windows = {90: window(15), 300: window(45, 3000)}
+        with patch.object(impact, 'read_windows', return_value=windows):
+            for errors, expected in ((0, 'p1'), (1, 'p1'), (2, 'p0')):
+                with self.subTest(errors=errors), \
+                     patch.object(impact, 'response_health', return_value=(1000, errors)):
+                    d = gate._latency_decision(gate.Decision('send', 42, '观察到期'),
+                                              EXPR, LABELS, 35, 30, gate.TrendPolicy(), NOW)
+                    self.assertEqual((d.action, d.notification_severity), ('send', expected))
+                    self.assertFalse(d.short_recovered)
+            with patch.object(impact, 'response_health', side_effect=ValueError('响应不足')):
+                with self.assertRaises(ValueError):
+                    gate._latency_decision(gate.Decision('send', 42, '观察到期'),
+                                          EXPR, LABELS, 35, 30, gate.TrendPolicy(), NOW)
+
+    def test_unknown_severe_tail_with_value_at_hard_limit_keeps_p0(self):
+        short, long = window(15, severe=15), window(45, 3000, severe=15)
+        del short.counts[75000]
+        del long.counts[75000]
+        with patch.object(impact, 'read_windows', return_value={90: short, 300: long}), \
+             patch.object(impact, 'response_health', side_effect=AssertionError('严重尾部不确定不能降级')):
+            d = gate._latency_decision(gate.Decision('send', 75, '达到硬上限'),
+                                      EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+            self.assertEqual((d.action, d.notification_severity, d.urgent), ('send', 'p0', True))
+
     def test_missing_or_insufficient_response_evidence_cannot_downgrade(self):
         for rows in ([], responses({'500': 200}), responses({'200': 99}), responses({'unknown': 1000})):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
@@ -199,13 +358,15 @@ class ImpactAlgorithmTests(unittest.TestCase):
                                        30, 30, gate.TrendPolicy(), NOW)
         self.assertEqual(read.call_args.args[3], 100)
 
-    def test_uncertain_at_deadline_keeps_urgent_fallback(self):
-        windows = {90: window(15), 300: window(15, 3000)}
-        with patch.object(impact, 'read_windows', return_value=windows):
+    def test_uncertain_trigger_at_deadline_sends_p1_without_claiming_recovery(self):
+        windows = {90: window(15), 300: window(45, 3000)}
+        with patch.object(impact, 'read_windows', return_value=windows), \
+             patch.object(impact, 'response_health', return_value=(1000, 0)):
             for action in ('send', 'cancel'):
                 result = gate._latency_decision(gate.Decision(action, 36, '观察到期', urgent=False),
                                                 EXPR, LABELS, 35, 30, gate.TrendPolicy(), NOW)
-                self.assertEqual((result.action, result.notification_severity), ('send', 'p0'))
+                self.assertEqual((result.action, result.notification_severity), ('send', 'p1'))
+                self.assertFalse(result.short_recovered)
 
     def test_healthy_observation_respects_180_second_deadline(self):
         with patch.object(impact, 'read_windows', return_value={90: window(0), 300: window(0)}), \
@@ -262,12 +423,96 @@ class ImpactAlgorithmTests(unittest.TestCase):
                                             30, 30, 2.5)[0])
 
     def test_short_only_spike_long_boundary_and_p0_priority(self):
-        for long_slow, severe, expected in ((30, 0, 'p1'), (31, 0, 'p0'), (20, 11, 'p0')):
+        for long_slow, severe, expected in ((30, 0, 'p1'), (31, 0, 'p1'),
+                                           (60, 0, 'p1'), (20, 11, 'p0')):
             with self.subTest(long_slow=long_slow, severe=severe):
                 level, _ = impact.impact_level(self.spec,
                     {90: window(20, severe=severe), 300: window(long_slow, 3000, severe=severe)},
                     30, 30, 2.5)
                 self.assertEqual(level, expected)
+
+    def test_reported_oct12_spike_is_observed_then_p1_without_mentions(self):
+        # MAID e12c... 的真实发送点：8/394、24/1195、零5xx/408。
+        windows = {90: window(8, 394), 300: window(24, 1195)}
+        with patch.object(impact, 'read_windows', return_value=windows), \
+             patch.object(impact, 'response_health', return_value=(386, 0)):
+            for action in ('observe', 'send'):
+                d = gate._latency_decision(gate.Decision(action, 36.2667, '原窗口判断', urgent=True),
+                                          EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+                self.assertEqual((d.action, d.notification_severity, d.urgent), (action, 'p1', False))
+                self.assertFalse(d.short_recovered)
+                self.assertFalse(gate.oncall_mention_policy(d))
+
+    def test_continuous_two_percent_p99_is_not_emergency(self):
+        windows = {90: window(200, 10000), 300: window(600, 30000)}
+        level, e = impact.impact_level(self.spec, windows, 30, 30, 2.5)
+        self.assertGreater(e['short_slow_confidence_low'], .01)
+        self.assertEqual(e['urgent_ratio'], .03)
+        self.assertEqual(level, 'p1')
+
+    def test_nested_burst_cannot_supply_earlier_window_evidence(self):
+        # 最近90秒突刺会把300秒均值一并拉高，但此前210秒完全正常。
+        windows = {90: window(200), 300: window(200, 3000)}
+        level, e = impact.impact_level(self.spec, windows, 30, 30, 2.5)
+        self.assertGreater(e['long_slow_confidence_low'], .03)
+        self.assertEqual(e['prior_slow_low'], 0)
+        self.assertFalse(e['sustained'])
+        self.assertEqual(level, 'p1')
+
+    def test_prior_weak_or_insufficient_samples_cannot_confirm_continuity(self):
+        for short, long in ((window(100), window(101, 1050)),
+                            (window(100), window(120, 2000))):
+            with self.subTest(long_n=long.total):
+                level, e = impact.impact_level(self.spec, {90: short, 300: long}, 30, 30, 2.5)
+                self.assertEqual(level, 'p1')
+                self.assertFalse(e['sustained'])
+
+    def test_invalid_difference_is_not_used_as_persistence_evidence(self):
+        # 原窗口各自有效，但差分桶不单调；不从差分推断持续扩大。
+        short, long = window(100), window(300, 3000)
+        long.counts[75000] = 2890
+        level, e = impact.impact_level(self.spec, {90: short, 300: long}, 30, 30, 2.5)
+        self.assertFalse(e['prior_valid'])
+        self.assertFalse(e['sustained'])
+        self.assertEqual(level, 'p1')
+
+    def test_p0_boundaries_remain_reachable_for_all_quantiles(self):
+        for q, boundary, slow in ((.99, .03, 100), (.95, .15, 300), (.5, .6, 800)):
+            with self.subTest(q=q):
+                level, e = impact.impact_level(replace(self.spec, quantile=q),
+                        {90: window(slow), 300: window(slow*3, 3000)}, 30, 30, 2.5)
+                self.assertAlmostEqual(e['urgent_ratio'], boundary)
+                self.assertEqual(level, 'p0')
+
+    def test_coarse_severe_bucket_with_mild_value_needs_response_evidence(self):
+        short, long = window(15, severe=15), window(45, 3000, severe=15)
+        del short.counts[75000]
+        del long.counts[75000]
+        with patch.object(impact, 'read_windows', return_value={90: short, 300: long}):
+            for errors, expected in ((0, 'p1'), (2, 'p0')):
+                with self.subTest(errors=errors), \
+                     patch.object(impact, 'response_health', return_value=(1000, errors)):
+                    d = gate._latency_decision(gate.Decision('send', 42, '观察到期'),
+                                              EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+                    self.assertEqual(d.notification_severity, expected)
+                    self.assertFalse(d.short_recovered)
+            with patch.object(impact, 'response_health', side_effect=ValueError('响应不足')):
+                with self.assertRaises(ValueError):
+                    gate._latency_decision(gate.Decision('send', 42, '观察到期'),
+                                          EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
+
+    def test_unknown_tail_does_not_downgrade_missing_value_or_hard_limit(self):
+        short, long = window(15, severe=15), window(45, 3000, severe=15)
+        del short.counts[75000]
+        del long.counts[75000]
+        for value, policy in ((None, gate.TrendPolicy()), (float('nan'), gate.TrendPolicy()),
+                              (75, gate.TrendPolicy())):
+            with self.subTest(value=value), \
+                 patch.object(impact, 'read_windows', return_value={90: short, 300: long}), \
+                 patch.object(impact, 'response_health', side_effect=AssertionError('不能降级')):
+                d = gate._latency_decision(gate.Decision('send', value, '保守兜底'),
+                                          EXPR, LABELS, 30, 30, policy, NOW)
+                self.assertEqual(d.notification_severity, 'p0')
 
     def test_short_only_spike_response_errors_keep_p0_and_missing_evidence_fails(self):
         windows = {90: window(20), 300: window(20, 3000)}
@@ -331,7 +576,7 @@ class NotificationTests(unittest.TestCase):
             read.return_value = {90: window(8, 391), 300: window(9, 1226)}
             mild = gate._latency_decision(baseline, EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
             self.assertFalse(gate.grade_upgrade(mild, self.state))
-            read.return_value = {90: window(8, 391), 300: window(14, 1226)}
+            read.return_value = {90: window(40, 391), 300: window(120, 1226)}
             severe = gate._latency_decision(baseline, EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
             self.assertEqual((severe.action, severe.notification_severity, severe.urgent), ('send', 'p0', True))
             self.assertTrue(gate.grade_upgrade(severe, self.state))
@@ -350,6 +595,52 @@ class NotificationTests(unittest.TestCase):
             self.state['payload']['_trend_last_notification_severity'] = 'p0'
             alert_handler._process_trend_config(self.data, self.route, 'TTFT', object(), self.key)
             self.assertEqual(send.call_count, 1)
+
+    def test_same_grade_repeat_respects_cooldown_in_http_and_worker(self):
+        for grade in ('p0', 'p1'):
+            for seconds, expected in ((0, False), (299.999, False), (300, True), (301, True)):
+                state = dict(self.state, seconds_since_sent=seconds,
+                             payload=json.dumps(dict(self.data, _trend_last_notification_severity=grade)))
+                decision = replace(self.p0, value=100, notification_severity=grade, urgent=grade == 'p0')
+                with self.subTest(grade=grade, seconds=seconds), \
+                     patch.object(gate, 'get_state', return_value=state), \
+                     patch.object(gate, 'decide', return_value=decision), patch.object(gate, 'log_decision'), \
+                     patch.object(gate, 'save_pending') as pending, patch.object(gate, 'mark_sent_decision') as mark, \
+                     patch.object(gate, 'schedule_next') as schedule, patch.object(trend_worker, 'db_cursor') as db, \
+                     patch.object(alert_handler, '_process_single_alert_config', return_value={'message_id': 'm'}) as send:
+                    db.return_value.__enter__.return_value = (MagicMock(), MagicMock(fetchone=lambda: self.route))
+                    alert_handler._process_trend_config(self.data, self.route, 'TTFT', object(), self.key)
+                    trend_worker._process_pending_state(self.key, object(), state, self.data)
+                    self.assertEqual(send.call_count, 2 if expected else 0)
+                    self.assertEqual(mark.call_count, 2 if expected else 0)
+                    if not expected:
+                        pending.assert_not_called()
+                        schedule.assert_called_once()
+
+    def test_persistent_cooldown_survives_restart_without_elapsed_field(self):
+        now = datetime(2026, 10, 11, 1)
+        state = dict(self.state, last_sent_at=now-timedelta(seconds=299),
+                     payload=dict(self.data, _trend_last_notification_severity='p0'))
+        with patch.object(gate, 'datetime') as clock:
+            clock.now.return_value = now
+            self.assertFalse(gate.should_repeat_notification(replace(self.p0, value=100), state))
+            clock.now.return_value = now+timedelta(seconds=1)
+            self.assertTrue(gate.should_repeat_notification(replace(self.p0, value=100), state))
+
+    def test_failed_repeat_after_cooldown_is_retried_without_recording_success(self):
+        state = dict(self.state, seconds_since_sent=300,
+                     payload=dict(self.data, _trend_last_notification_severity='p0'))
+        with patch.object(trend_worker, 'db_cursor') as db, \
+             patch.object(gate, 'decide', return_value=replace(self.p0, value=100)), \
+             patch.object(gate, 'log_decision'), patch.object(gate, 'mark_sent_decision') as mark, \
+             patch.object(gate, 'schedule_next'), \
+             patch.object(alert_handler, '_process_single_alert_config', side_effect=[None, {'message_id': 'm'}]) as send:
+            db.return_value.__enter__.return_value = (MagicMock(), MagicMock(fetchone=lambda: self.route))
+            trend_worker._process_pending_state(self.key, object(), state, self.data)
+            mark.assert_not_called()
+            trend_worker._process_pending_state(self.key, object(), state, self.data)
+            mark.assert_called_once()
+            self.assertEqual(send.call_count, 2)
 
     def test_worker_upgrade_and_failed_send_retry_not_restored_to_p1(self):
         for status in ('sent', 'pending'):
@@ -437,9 +728,9 @@ class NotificationTests(unittest.TestCase):
         evaluate.assert_not_called()
 
     def test_decide_integrates_fresh_buckets_and_response_evidence(self):
-        for slow, grade in ((0, 'p1'), (20, 'p0')):
+        for slow, grade in ((0, 'p1'), (100, 'p0')):
             results = [{'metric': LABELS, 'values': [[t, '31'] for t in range(820, 1001, 15)]}]
-            queries = [results, matrix({90: window(slow), 300: window(slow)})]
+            queries = [results, matrix({90: window(slow), 300: window(slow*3, 3000)})]
             if grade == 'p1':
                 queries.append(responses({'200': 1000}))
             with self.subTest(grade=grade), patch.object(gate.Config, 'GRAFANA_RULES_READ_KEY', 'test'), \

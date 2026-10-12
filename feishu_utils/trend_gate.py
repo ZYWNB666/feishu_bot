@@ -288,6 +288,18 @@ def grade_upgrade(decision, state):
     return previous == 'p1' and decision.urgent is None
 
 
+def should_repeat_notification(decision, state):
+    """首次升级即时发送；已分级延迟告警的同级恶化须经过持久化冷却。"""
+    if decision.action != 'send':
+        return False
+    if grade_upgrade(decision, state):
+        return True
+    if (decision.reason == '指标样本不足，按原流程发送'
+            or not is_escalation(decision.value, state.get('last_value'), decision.direction)):
+        return False
+    return not (decision.notification_severity in ('p0', 'p1') and duplicate_sent(state))
+
+
 def mark_sent_decision(key, decision):
     if Config.TREND_IMPACT_ENABLED:
         mark_sent(key, decision.value, decision.reason,
@@ -508,15 +520,27 @@ def with_decision_note(data, decision):
 
 
 def _latency_decision(decision, expression, labels, threshold, recovery, policy, now):
-    """明确持续/严重影响立即 P0；仅充分证据允许 P1，任何不确定都不降级。"""
+    """明确持续/严重影响立即 P0；弱持续证据、短时波动和恢复过渡只发 P1。"""
     spec = latency_impact.parse_histogram(expression, labels)
     minimum = max(policy.min_requests, math.ceil(1 / spec.allowed_ratio))
     windows = latency_impact.read_windows(spec, labels, now, minimum, _vm_query)
-    level, evidence = latency_impact.impact_level(spec, windows, threshold, recovery, policy.hard_ratio)
+    level, evidence = latency_impact.impact_level(spec, windows, threshold, recovery, policy.hard_ratio,
+                                                min_samples=minimum)
+    # 桶区间跨越严重阈值仅说明精度不足。有效快照未证明严重/持续影响、
+    # 原规则复查值也未达到硬上限时，可凭成功响应证据保持P1，不能据此宣布恢复。
+    mild_value = (decision.value is not None and math.isfinite(decision.value)
+                  and decision.value < threshold * policy.hard_ratio)
+    evidence['hard_boundary_uncertain'] = level is None and mild_value
+    if evidence['hard_boundary_uncertain']:
+        level = 'p1'
     if level == 'p1':
+        limit = latency_impact.MAX_ERROR_RATIO
+        if not math.isfinite(limit) or not 0 <= limit <= 1:
+            raise ValueError('TREND_IMPACT_MAX_ERROR_RATIO 必须为0至1的有限数值')
         total, errors = latency_impact.response_health(spec, labels, now, minimum, _vm_query)
-        evidence.update(response_total=total, response_errors=errors)
-        if errors > latency_impact.EPSILON:
+        evidence.update(response_total=total, response_errors=errors,
+                        response_error_ratio=errors / total, response_error_ratio_limit=limit)
+        if errors > total * limit + latency_impact.EPSILON:
             level = None
     logger.info('event=trend.impact level=%s short_seconds=%s long_seconds=%s snapshot_time=%.3f '
                 'snapshot_lag_seconds=%s metric=%s '
@@ -529,28 +553,47 @@ def _latency_decision(decision, expression, labels, threshold, recovery, policy,
         reason = (f"短窗口严重超标（超过{policy.hard_ratio:g}倍阈值的观测占比"
                   f"{evidence['hard_slow_low']:.2%}）" if evidence['severe'] else
                   f"短长窗口慢观测占比同时超标（{latency_impact.SHORT_SECONDS}秒≥{evidence['short_slow_low']:.2%}，"
-                  f"{latency_impact.LONG_SECONDS}秒≥{evidence['long_slow_low']:.2%}，规则边界{spec.allowed_ratio:.2%}）")
+                  f"{latency_impact.LONG_SECONDS}秒≥{evidence['long_slow_low']:.2%}，"
+                  f"此前{evidence['prior_seconds']}秒≥{evidence['prior_slow_low']:.2%}，"
+                  f"样本量缓冲后均超过P0影响边界{evidence['urgent_ratio']:.2%}）")
         return replace(decision, action='send', urgent=True, short_recovered=False,
                        notification_severity='p0', reason=reason)
     if level == 'p1':
-        if evidence['transient']:
-            # 短窗口仍越线，不把普通级别误当恢复；长窗口 cancel 也须发普通通知。
-            reason = ('短窗口仍越线' if decision.action == 'cancel' else decision.reason)
+        if not evidence['recovered']:
+            # P1 不能误当恢复；原长窗口 cancel 也不能取消尚未确认恢复的事件。
+            if evidence['hard_boundary_uncertain']:
+                note = '严重阈值位于桶区间内，复查值未达到硬上限，尚无明确严重或持续扩大影响'
+            elif evidence['borderline']:
+                note = (f"慢观测占比越过规则边界{spec.allowed_ratio:.2%}，"
+                        f"但样本量缓冲后尚未确认当前及此前窗口均超过P0影响边界{evidence['urgent_ratio']:.2%}")
+            elif evidence['below_trigger']:
+                note = '短长窗口已满足触发阈值，尚未确认满足恢复阈值'
+            elif evidence['uncertain_nonsevere']:
+                note = ('触发阈值位于桶区间内，未确认持续影响；'
+                        f"严重尾部比例上界{evidence['hard_slow_high']:.2%}未超过规则边界{spec.allowed_ratio:.2%}")
+            else:
+                note = (f"短窗口慢观测占比{evidence['short_slow_low']:.2%}～{evidence['short_slow_high']:.2%}，"
+                        f"长窗口≤{evidence['long_slow_high']:.2%}，无明确持续影响")
+            reason = '当前告警尚未解除' if decision.action == 'cancel' else decision.reason
             return replace(decision, action='send' if decision.action == 'cancel' else decision.action,
                            urgent=False, short_recovered=False, notification_severity='p1',
-                           reason=reason + f"；短窗口慢观测占比≥{evidence['short_slow_low']:.2%}，"
-                           f"长窗口≤{evidence['long_slow_high']:.2%}，响应正常，仅群通知并继续监测")
+                           reason=reason + '；' + note +
+                           f"，响应错误率{evidence['response_error_ratio']:.3%}，仅群通知并继续监测")
         return replace(decision, urgent=False, short_recovered=True,
                        notification_severity='p1', reason=decision.reason +
                        f"；短窗口慢观测占比≤{evidence['recovery_slow_high']:.2%}，仅群通知")
-    # 未确认恢复时保留明显恶化/硬上限；观察到期也不凭不足的证据降级。
+    # 严重尾部仍不确定或响应错误率超限，保留原来的观察/紧急兜底。
+    fallback_reason = ('严重尾部影响未确认缓解，保留紧急通知'
+                       if 'response_error_ratio' not in evidence else
+                       f"响应错误率{evidence['response_error_ratio']:.3%}超过P1容忍上限"
+                       f"{evidence['response_error_ratio_limit']:.3%}，保留紧急通知")
     if decision.action == 'send':
         return replace(decision, urgent=True, notification_severity='p0',
-                       reason=decision.reason + '；当前影响未确认缓解，保留紧急通知')
+                       reason=decision.reason + '；' + fallback_reason)
     # 长窗口已恢复但短窗口仍不确定，不能据长窗口取消一个新故障。
     if decision.action == 'cancel':
         return replace(decision, action='send', urgent=True, notification_severity='p0',
-                       reason='短窗口影响未确认缓解，保留紧急通知')
+                       reason=fallback_reason)
     return decision
 
 

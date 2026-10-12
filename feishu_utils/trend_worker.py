@@ -123,11 +123,14 @@ def _process_pending_state(key, feishu_client, current, data):
 
     if current['status'] == 'sent':
         prior = current.get('last_value')
-        worsened = (decision.action == 'send'
-                    and (trend_gate.grade_upgrade(decision, current)
-                         or (trend_gate.is_escalation(decision.value, prior, decision.direction)
-                             and decision.reason != '指标样本不足，按原流程发送')))
+        worsened = trend_gate.should_repeat_notification(decision, current)
         if not worsened:
+            reason = ('重复通知冷却中' if trend_gate.duplicate_sent(current)
+                      else '同一轮告警已通知，未明显恶化')
+            logger.info('event=trend.notify.skip rule_uid=%s value=%s last_sent_value=%s '
+                        'severity=%s cooldown_seconds=%s reason=%s',
+                        key[0], decision.value, prior, decision.notification_severity or 'original',
+                        trend_gate.TREND_DEDUP_SECONDS, reason)
             trend_gate.schedule_next(key, '已通知，持续监测恶化', TREND_SENT_CHECK_SECONDS)
             return
         if not config_row:

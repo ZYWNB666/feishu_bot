@@ -682,10 +682,7 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
 
     if state and state['status'] == 'sent':
         prior = state.get('last_value')
-        worsened = (decision.action == 'send'
-                    and (trend_gate.grade_upgrade(decision, state)
-                         or (trend_gate.is_escalation(decision.value, prior, decision.direction)
-                             and decision.reason != '指标样本不足，按原流程发送')))
+        worsened = trend_gate.should_repeat_notification(decision, state)
         if not worsened:
             reason = ('5 分钟内重复投递' if trend_gate.duplicate_sent(state)
                       else '同一轮告警已通知，未明显恶化')
