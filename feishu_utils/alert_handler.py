@@ -659,7 +659,8 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
                 key[0], state['status'] if state else 'new')
 
     if _is_all_resolved(data):
-        if state and state['status'] in ('pending', 'resolved') and not state.get('last_sent_at'):
+        if state and (not state.get('last_sent_at')
+                      or trend_gate.state_payload(state).get('_trend_last_notification_severity') == 'p1'):
             trend_gate.mark_resolved(key, '观察期内恢复，未发送 firing')
             return {'group_id': key[1], 'success': True, 'skipped': True,
                     'reason': '观察期内恢复'}
@@ -672,13 +673,22 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
         return response
 
     first_seen = (state['first_seen'].replace(tzinfo=timezone.utc).timestamp()
-                  if state and state['status'] == 'pending' else time.time())
+                  if state and state['status'] in ('pending', 'sent') else time.time())
     try:
         decision = trend_gate.decide(data, first_seen, policy)
     except Exception:
-        logger.exception("指标趋势查询失败，立即发送: rule_uid=%s", key[0])
+        logger.exception("指标趋势查询失败，进入通知兜底判断: rule_uid=%s", key[0])
         decision = trend_gate.Decision('send', None, '指标查询失败，按原流程发送')
     trend_gate.log_decision(key, decision)
+
+    if trend_gate.suppress_p1_notification(decision, state):
+        try:
+            reason = trend_gate.observe_without_notification(
+                key, config_row['id'], data, first_seen, decision, state)
+            return {'group_id': key[1], 'success': True, 'skipped': True, 'reason': reason}
+        except Exception:
+            logger.exception('P1观察状态保存失败，等待重试: %s', key)
+            return {'group_id': key[1], 'success': False, 'error': 'P1观察状态保存失败'}
 
     if state and state['status'] == 'sent':
         prior = state.get('last_value')
@@ -702,6 +712,7 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
                 'reason': decision.reason}
 
     try:
+        data = trend_gate.observation_payload(data, decision, state)
         trend_gate.save_pending(key, config_row['id'], data, first_seen, decision.reason)
     except Exception:
         logger.exception("趋势状态写入失败，按原流程发送: %s", key)
@@ -711,7 +722,7 @@ def _process_trend_config(data, config_row, alertname, feishu_client, key, polic
         return {'group_id': key[1], 'success': True, 'skipped': True,
                 'reason': decision.reason}
 
-    send_data = trend_gate.with_decision_note(data, decision)
+    send_data = trend_gate.with_decision_note(data, decision, state)
     response = _process_single_alert_config(
         send_data, config_row, alertname, feishu_client,
         mention_oncall=trend_gate.oncall_mention_policy(

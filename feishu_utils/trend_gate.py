@@ -284,13 +284,15 @@ def grade_upgrade(decision, state):
     # 旧状态没有等级证据：首次确认 P0 允许补发一次，之后持久化消除重复。
     if decision.notification_severity == 'p0':
         return previous != 'p0'
-    # 已降为 P1 后失去查询证据，补发原级别一次；不能一直沿用旧 P1。
-    return previous == 'p1' and decision.urgent is None
+    # 查询失去证据不能作为 P1 升级为 P0 的依据。
+    return False
 
 
 def should_repeat_notification(decision, state):
     """首次升级即时发送；已分级延迟告警的同级恶化须经过持久化冷却。"""
     if decision.action != 'send':
+        return False
+    if suppress_p1_notification(decision, state):
         return False
     if grade_upgrade(decision, state):
         return True
@@ -502,25 +504,87 @@ def _auto_request_metric(expression, direction):
     return matches[0]
 
 
-def with_decision_note(data, decision):
+def state_payload(state):
+    payload = (state or {}).get('payload') or {}
+    return json.loads(payload) if isinstance(payload, str) else payload
+
+
+def p1_observed(state):
+    if not state or state.get('status') == 'resolved':
+        return False
+    payload = state_payload(state)
+    return (payload.get('_trend_p1_observed') is True
+            or payload.get('_trend_last_notification_severity') == 'p1')
+
+
+def suppress_p1_notification(decision, state=None):
+    """P1 只观察；已确认P1后失去证据也不能触发紧急补发。"""
+    return (decision.action != 'cancel'
+            and (decision.notification_severity == 'p1'
+                 or (decision.notification_severity is None and decision.urgent is None
+                     and p1_observed(state))))
+
+
+def observation_payload(data, decision, state=None):
+    updated = dict(data)
+    if state and state.get('status') != 'resolved':
+        previous = state_payload(state)
+        for name in ('_trend_observed', '_trend_p1_observed'):
+            if previous.get(name) is True:
+                updated[name] = True
+        if p1_observed(state):
+            updated['_trend_p1_observed'] = True
+    else:
+        updated.pop('_trend_observed', None)
+        updated.pop('_trend_p1_observed', None)
+    if decision.action == 'observe' or decision.notification_severity == 'p1':
+        updated['_trend_observed'] = True
+    if decision.notification_severity == 'p1':
+        updated['_trend_p1_observed'] = True
+    return updated
+
+
+def observe_without_notification(key, config_id, data, first_seen, decision, state=None):
+    reason = ('P1仅后台观察，不发送通知' if decision.notification_severity == 'p1'
+              else '已判定P1，当前证据不足，继续观察，不升级P0')
+    save_pending(key, config_id, observation_payload(data, decision, state), first_seen,
+                 reason + '；' + decision.reason,
+                 keep_sent=bool(state and state['status'] == 'sent'))
+    logger.info('event=trend.notify.suppress rule_uid=%s severity=%s value=%s reason=%s',
+                key[0], decision.notification_severity or 'unknown', decision.value, reason)
+    return reason
+
+
+def with_decision_note(data, decision, state=None):
     """发送观察后的卡片时标出当前复查值，避免只展示首次 Webhook 的旧数值。"""
     updated = dict(data)
     updated.pop('_trend_notification_severity', None)
     if decision.notification_severity in ('p0', 'p1'):
         updated['_trend_notification_severity'] = decision.notification_severity
-    if decision.value is None:
+    notes = []
+    if decision.notification_severity == 'p0':
+        # 兼容升级前已进入观察、尚无新payload标记的pending记录。
+        legacy_observed = (state and state.get('status') == 'pending'
+                           and '观察' in (state.get('reason') or ''))
+        observed = (data.get('_trend_observed') is True or p1_observed(state)
+                    or legacy_observed
+                    or (state and state.get('status') != 'resolved'
+                        and state_payload(state).get('_trend_observed') is True))
+        notes.append('路由判定：观察后升级为 P0' if observed else '路由判定：直接判定为 P0')
+    if decision.value is not None:
+        notes.append(f"路由复查指标值: {decision.value:.6g}（{decision.reason}）")
+    if not notes:
         return updated
     alert = dict(data['alerts'][0])
     annotations = dict(alert.get('annotations') or {})
-    note = f"路由复查指标值: {decision.value:.6g}（{decision.reason}）"
-    annotations['description'] = (annotations.get('description') or '') + '\n' + note
+    annotations['description'] = '\n'.join([annotations.get('description') or '', *notes]).strip()
     alert['annotations'] = annotations
     updated['alerts'] = [alert]
     return updated
 
 
 def _latency_decision(decision, expression, labels, threshold, recovery, policy, now):
-    """明确持续/严重影响立即 P0；弱持续证据、短时波动和恢复过渡只发 P1。"""
+    """明确持续/严重影响立即 P0；弱持续证据、短时波动和恢复过渡判为P1后台观察。"""
     spec = latency_impact.parse_histogram(expression, labels)
     minimum = max(policy.min_requests, math.ceil(1 / spec.allowed_ratio))
     windows = latency_impact.read_windows(spec, labels, now, minimum, _vm_query)
@@ -578,10 +642,10 @@ def _latency_decision(decision, expression, labels, threshold, recovery, policy,
             return replace(decision, action='send' if decision.action == 'cancel' else decision.action,
                            urgent=False, short_recovered=False, notification_severity='p1',
                            reason=reason + '；' + note +
-                           f"，响应错误率{evidence['response_error_ratio']:.3%}，仅群通知并继续监测")
+                           f"，响应错误率{evidence['response_error_ratio']:.3%}，仅后台观察，不通知并继续监测")
         return replace(decision, urgent=False, short_recovered=True,
                        notification_severity='p1', reason=decision.reason +
-                       f"；短窗口慢观测占比≤{evidence['recovery_slow_high']:.2%}，仅群通知")
+                       f"；短窗口慢观测占比≤{evidence['recovery_slow_high']:.2%}，仅后台观察，不通知")
     # 严重尾部仍不确定或响应错误率超限，保留原来的观察/紧急兜底。
     fallback_reason = ('严重尾部影响未确认缓解，保留紧急通知'
                        if 'response_error_ratio' not in evidence else
@@ -825,8 +889,9 @@ def _execute_state(cursor, sql, params):
         cursor.execute(sql.replace('cancel_streak=0, ', ''), params)
 
 
-def save_pending(key, config_id, data, first_seen, reason):
+def save_pending(key, config_id, data, first_seen, reason, *, keep_sent=False):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
+    delay = TREND_SENT_CHECK_SECONDS if keep_sent else TREND_CHECK_SECONDS
     with db_cursor() as (conn, cursor):
         _execute_state(cursor,
             '''INSERT INTO alert_trend_state
@@ -838,14 +903,15 @@ def save_pending(key, config_id, data, first_seen, reason):
                      JSON_EXTRACT(payload, '$._trend_last_notification_severity')), VALUES(payload)),
                  first_seen=VALUES(first_seen), next_check=VALUES(next_check), reason=VALUES(reason),
                  last_sent_at=IF(status='resolved', NULL, last_sent_at),
-                 `last_value`=IF(status='resolved', NULL, `last_value`), status='pending' ''',
+                 `last_value`=IF(status='resolved', NULL, `last_value`),
+                 status=IF(status='sent' AND %s, 'sent', 'pending') ''',
             (*key, config_id, json.dumps(data, ensure_ascii=False),
              datetime.fromtimestamp(first_seen, timezone.utc).replace(tzinfo=None),
-             now + timedelta(seconds=TREND_CHECK_SECONDS), reason),
+             now + timedelta(seconds=delay), reason, keep_sent),
         )
         conn.commit()
-    logger.info('event=trend.state.pending rule_uid=%s next_check_seconds=%s reason=%s',
-                key[0], TREND_CHECK_SECONDS, reason)
+    logger.info('event=trend.state.%s rule_uid=%s next_check_seconds=%s reason=%s',
+                'monitoring' if keep_sent else 'pending', key[0], delay, reason)
 
 
 def mark_sent(key, value, reason, *, notification_severity=None):

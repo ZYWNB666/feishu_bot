@@ -314,7 +314,7 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
         alertname: 告警名称，用作卡片标题
         severity: 告警级别 (critical/warning/info/success)，默认warning
         maid: 告警MAID，用于静默功能
-        incident_id: Flashcat incident ID，用于电话告警认领按钮
+        incident_id: Flashcat incident ID（保留参数兼容调用）
         
     Returns:
         int: HTTP状态码
@@ -469,25 +469,6 @@ def alert_to_feishu(feishu_client, alert_data, mentioned_user_list, group_id, al
                 }
             ]
 
-            # 电话告警时添加认领按钮
-            if incident_id:
-                elements.append({
-                    "tag": "action",
-                    "actions": [{
-                        "tag": "button",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": "📞 认领告警"
-                        },
-                        "type": "danger",
-                        "value": json.dumps({
-                            "action": "ack_incident",
-                            "maid": maid,
-                            "incident_id": incident_id
-                        })
-                    }]
-                })
-            
             elements.append({
                 "tag": "action",
                 "actions": silence_actions

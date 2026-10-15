@@ -252,7 +252,8 @@ class TrendRoutingTests(unittest.TestCase):
         send.assert_not_called()
 
     def test_worsening_bypasses_recent_duplicate(self):
-        state = {'status': 'sent', 'last_sent_at': datetime.now(), 'last_value': 32.0}
+        state = {'status': 'sent', 'last_sent_at': datetime.now(), 'last_value': 32.0,
+                 'first_seen': datetime.now()-timedelta(minutes=5)}
         with patch.object(trend_gate, 'get_state', return_value=state), \
              patch.object(trend_gate, 'decide', return_value=trend_gate.Decision('send', 45.0, '恶化', urgent=True)), \
              patch.object(trend_gate, 'log_decision'), \

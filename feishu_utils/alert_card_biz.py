@@ -123,7 +123,7 @@ def _silence_buttons(maid: str) -> dict:
 
 
 def _grafana_buttons(grafana_urls: dict, maid: str = None, incident_id: str = None) -> dict | None:
-    """构建 Grafana 跳转按钮 + 认领按钮 + 静默按钮（同一行）"""
+    """构建 Grafana 跳转按钮 + 静默按钮（同一行）"""
     actions = []
     if grafana_urls.get('panelURL'):
         actions.append({
@@ -138,13 +138,6 @@ def _grafana_buttons(grafana_urls: dict, maid: str = None, incident_id: str = No
             "text": {"tag": "plain_text", "content": "🔗 告警源"},
             "type": "default",
             "url": grafana_urls['generatorURL'],
-        })
-    if incident_id and maid:
-        actions.append({
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "📞 认领告警"},
-            "type": "danger",
-            "value": {"action": "ack_incident", "maid": maid, "incident_id": incident_id},
         })
     if maid:
         actions.append({
@@ -183,7 +176,7 @@ def build_biz_firing_card(
     :param maid: 告警记录 ID
     :param common_labels: 公共标签字典（alertname 除外）
     :param mentioned_user_list: 需要 @ 的 open_id 列表
-    :param incident_id: Flashcat incident ID（电话告警时传入，用于认领按钮）
+    :param incident_id: Flashcat incident ID（保留参数兼容调用）
     :return: str, 序列化好的卡片 JSON
     """
     color_map = {

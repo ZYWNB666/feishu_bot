@@ -101,6 +101,11 @@ def update_digests(feishu_client):
         return
     groups = defaultdict(list)
     for row in pending:
+        try:
+            if trend_gate.p1_observed(row):
+                continue  # P1仅后台观察，不出现在群汇总卡片中。
+        except (ValueError, TypeError, AttributeError):
+            pass  # 保留原有坏payload日志隔离，由build_card记录解析问题。
         groups[row['group_id']].append(row)
     for group_id in sorted(set(groups) | set(digests)):
         rows = groups[group_id]

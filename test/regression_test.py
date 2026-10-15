@@ -448,11 +448,11 @@ class SilenceExtensionTests(unittest.TestCase):
                 "📅 自定义时间",
             ],
         )
-        self.assertTrue(
+        self.assertFalse(
             any(
-                row["actions"][0].get("text", {}).get("content") == "📞 认领告警"
+                button.get("text", {}).get("content") == "📞 认领告警"
                 for row in action_rows
-                if len(row["actions"]) == 1
+                for button in row["actions"]
             )
         )
 

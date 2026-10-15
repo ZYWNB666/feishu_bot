@@ -117,9 +117,15 @@ def _process_pending_state(key, feishu_client, current, data):
                        key[0], current['status'])
         return
     except Exception:
-        logger.exception("待观察告警指标查询失败，按原流程发送: %s", key)
+        logger.exception("待观察告警指标查询失败，进入通知兜底判断: %s", key)
         decision = trend_gate.Decision('send', None, '指标查询失败，按原流程发送')
     trend_gate.log_decision(key, decision)
+
+    if trend_gate.suppress_p1_notification(decision, current) and config_row:
+        trend_gate.observe_without_notification(
+            key, config_row['id'], data,
+            current['first_seen'].replace(tzinfo=timezone.utc).timestamp(), decision, current)
+        return
 
     if current['status'] == 'sent':
         prior = current.get('last_value')
@@ -136,7 +142,7 @@ def _process_pending_state(key, feishu_client, current, data):
         if not config_row:
             trend_gate.mark_resolved(key, '原路由配置已删除')
             return
-        send_data = trend_gate.with_decision_note(data, decision)
+        send_data = trend_gate.with_decision_note(data, decision, current)
         response = _process_single_alert_config(
             send_data, config_row, extract_alertname(data), feishu_client,
             mention_oncall=trend_gate.oncall_mention_policy(decision, prior),
@@ -170,7 +176,7 @@ def _process_pending_state(key, feishu_client, current, data):
     if not config_row:
         trend_gate.mark_resolved(key, '原路由配置已删除')
         return
-    send_data = trend_gate.with_decision_note(data, decision)
+    send_data = trend_gate.with_decision_note(data, decision, current)
     response = _process_single_alert_config(
         send_data, config_row, extract_alertname(data), feishu_client,
         mention_oncall=trend_gate.oncall_mention_policy(decision, prior),

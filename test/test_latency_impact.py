@@ -547,9 +547,9 @@ class NotificationTests(unittest.TestCase):
         d = replace(self.p0, notification_severity='p1', urgent=False, value=60)
         self.assertIs(gate.oncall_mention_policy(d, 40), False)
 
-    def test_grade_upgrade_and_error_fallback_ignore_numeric_growth(self):
+    def test_grade_upgrade_ignores_growth_but_query_failure_is_not_upgrade(self):
         self.assertTrue(gate.grade_upgrade(self.p0, self.state))
-        self.assertTrue(gate.grade_upgrade(gate.Decision('send', None, '查询失败'), self.state))
+        self.assertFalse(gate.grade_upgrade(gate.Decision('send', None, '查询失败'), self.state))
         self.assertFalse(gate.grade_upgrade(replace(self.p0, action='observe'), self.state))
         state = dict(self.state, payload=dict(self.data, _trend_last_notification_severity='p0'))
         self.assertFalse(gate.grade_upgrade(self.p0, state))
@@ -560,16 +560,16 @@ class NotificationTests(unittest.TestCase):
             decision = gate._latency_decision(gate.Decision('send', 38.3697, '观察到期'),
                                               EXPR, LABELS, 30, 30, gate.TrendPolicy(), NOW)
         with patch.object(trend_worker, 'db_cursor') as db, patch.object(gate, 'decide', return_value=decision), \
-             patch.object(gate, 'log_decision'), patch.object(gate, 'schedule_next') as schedule, \
+             patch.object(gate, 'log_decision'), patch.object(gate, 'save_pending') as pending, \
              patch.object(gate, 'mark_sent_decision') as mark, \
              patch.object(alert_handler, '_process_single_alert_config') as send:
             db.return_value.__enter__.return_value = (MagicMock(), MagicMock(fetchone=lambda: self.route))
             trend_worker._process_pending_state(self.key, gate.TrendPolicy(), self.state, self.data)
             send.assert_not_called()
             mark.assert_not_called()
-            schedule.assert_called_once()
+            pending.assert_called_once()
 
-    def test_transient_p1_later_sustained_or_query_failure_still_upgrades(self):
+    def test_transient_p1_later_sustained_upgrades_but_query_failure_does_not(self):
         baseline = gate.Decision('send', 38.3697, '观察到期')
         with patch.object(impact, 'read_windows') as read, \
              patch.object(impact, 'response_health', return_value=(393, 0)):
@@ -581,7 +581,7 @@ class NotificationTests(unittest.TestCase):
             self.assertEqual((severe.action, severe.notification_severity, severe.urgent), ('send', 'p0', True))
             self.assertTrue(gate.grade_upgrade(severe, self.state))
             self.assertTrue(gate.oncall_mention_policy(severe))
-            self.assertTrue(gate.grade_upgrade(gate.Decision('send', None, '查询失败'), self.state))
+            self.assertFalse(gate.grade_upgrade(gate.Decision('send', None, '查询失败'), self.state))
 
     def test_http_p1_to_p0_sends_once_without_increase(self):
         with patch.object(gate, 'get_state', return_value=self.state), \
@@ -598,7 +598,8 @@ class NotificationTests(unittest.TestCase):
 
     def test_same_grade_repeat_respects_cooldown_in_http_and_worker(self):
         for grade in ('p0', 'p1'):
-            for seconds, expected in ((0, False), (299.999, False), (300, True), (301, True)):
+            for seconds in (0, 299.999, 300, 301):
+                expected = grade == 'p0' and seconds >= 300
                 state = dict(self.state, seconds_since_sent=seconds,
                              payload=json.dumps(dict(self.data, _trend_last_notification_severity=grade)))
                 decision = replace(self.p0, value=100, notification_severity=grade, urgent=grade == 'p0')
@@ -613,7 +614,10 @@ class NotificationTests(unittest.TestCase):
                     trend_worker._process_pending_state(self.key, object(), state, self.data)
                     self.assertEqual(send.call_count, 2 if expected else 0)
                     self.assertEqual(mark.call_count, 2 if expected else 0)
-                    if not expected:
+                    if grade == 'p1':
+                        self.assertEqual(pending.call_count, 2)
+                        schedule.assert_not_called()
+                    elif not expected:
                         pending.assert_not_called()
                         schedule.assert_called_once()
 
@@ -690,16 +694,17 @@ class NotificationTests(unittest.TestCase):
             alert_handler._process_single_alert_config(data, route, 'TTFT', object(), mention_oncall=True)
         self.assertEqual(send.call_args.args[2], ['static-user'])
 
-    def test_query_failure_after_p1_sends_original_grade_once(self):
+    def test_query_failure_after_p1_remains_silent_and_keeps_observing(self):
         with patch.object(gate, 'get_state', return_value=self.state), \
              patch.object(gate, 'decide', side_effect=TimeoutError('VM 不可用')), \
-             patch.object(gate, 'log_decision'), patch.object(gate, 'save_pending'), \
+             patch.object(gate, 'log_decision'), patch.object(gate, 'save_pending') as pending, \
              patch.object(gate, 'mark_sent') as mark, \
              patch.object(alert_handler, '_process_single_alert_config', return_value={'message_id': 'm'}) as send:
             alert_handler._process_trend_config(self.data, self.route, 'TTFT', object(), self.key)
-        self.assertIsNone(send.call_args.kwargs['mention_oncall'])
-        self.assertNotIn('_trend_notification_severity', send.call_args.args[0])
-        self.assertEqual(mark.call_args.kwargs['notification_severity'], 'original')
+        send.assert_not_called()
+        mark.assert_not_called()
+        pending.assert_called_once()
+        self.assertTrue(pending.call_args.args[2]['_trend_p1_observed'])
 
     def test_persistence_grade_only_on_success_and_pending_preserves_old_grade(self):
         with patch.object(gate, 'db_cursor') as db:
