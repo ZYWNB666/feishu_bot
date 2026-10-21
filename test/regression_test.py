@@ -387,6 +387,7 @@ class PhoneAlertFallbackTests(unittest.TestCase):
                 return_value=(False, "Flashcat API \u7f51\u7edc\u4e0d\u53ef\u8fbe\uff08DNS/\u8fde\u63a5\u5931\u8d25\uff09"),
             ),
             patch.object(alert_handler.Config, "FLASHCAT_APP_KEY", "test-app-key"),
+            patch.object(alert_handler, "_night_phone_degradation_reason", return_value=None),
             patch.object(alert_handler, "_create_phone_incident") as create_incident,
             patch.object(alert_handler, "update_message_id"),
             patch.object(alert_handler, "save_card_content"),

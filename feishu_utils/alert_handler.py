@@ -14,7 +14,7 @@ import json
 import logging
 import threading
 import time
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
 from config.config import Config
 from config.constants import (
@@ -43,6 +43,69 @@ _resolved_dedup_lock = threading.Lock()
 _alert_label_dedup_cache = BoundedTTLCache(maxsize=ALERT_DEDUP_CACHE_MAXSIZE, ttl=ALERT_LABEL_DEDUP_TTL)
 _alert_label_dedup_lock = threading.Lock()
 
+# 进程内记录持续告警的夜间次数，收到恢复后清除；跨天不重置。
+_night_phone_counts = BoundedTTLCache(maxsize=ALERT_DEDUP_CACHE_MAXSIZE, ttl=float('inf'))
+_night_phone_lock = threading.Lock()
+
+
+def _night_phone_key(data: dict, group_id: str) -> tuple:
+    # 同规则的多实例可能被聚合，保持与单实例的规则标识一致。
+    rule = trend_gate.rule_uid({'alerts': data.get('alerts', [])[:1]}) or extract_alertname(data)
+    return rule, group_id
+
+
+def _reset_night_phone_for_resolved(data: dict, group_id: str) -> None:
+    """聚合告警需全部实例恢复才重置，部分恢复保留其他实例的累计次数。"""
+    key = _night_phone_key(data, group_id)
+    with _night_phone_lock:
+        state = _night_phone_counts.get(key)
+        if state is None:
+            return
+        active = state['active'] - set(extract_fingerprints(data))
+        if active:
+            _night_phone_counts.set(key, dict(state, active=active))
+        else:
+            _night_phone_counts.pop(key, None)
+
+
+def _night_phone_degradation_reason(data: dict, group_id: str) -> str | None:
+    """去重后调用；持续告警累计夜间次数，恢复后重新开始。"""
+    now = datetime.now(timezone(timedelta(hours=8)))
+    key = _night_phone_key(data, group_id)
+    with _night_phone_lock:
+        state = _night_phone_counts.get(key, {'count': 0, 'active': set()})
+        active = state['active'] | {a['fingerprint'] for a in data.get('alerts', [])
+                                    if a.get('status') == 'firing' and a.get('fingerprint')}
+        count = min(state['count'] + int(now.hour < 9), 4)
+        _night_phone_counts.set(key, {'count': count, 'active': active})
+    if now.hour >= 9:
+        return None
+    logger.info('event=phone.night group_id=%s rule=%s count=%s downgraded=%s',
+                group_id, key[0], count, count <= 3)
+    if count <= 3:
+        return f'北京时间 00:00–09:00 夜间第 {count} 次电话告警，已降级为 P0；第 4 次起电话通知'
+    return None
+
+
+def _phone_integration_key_override(data: dict) -> str:
+    """取当前实例的非空配置；未声明时沿用全局默认值。"""
+    for alert in data.get('alerts', []):
+        value = alert.get('labels', {}).get('flashcat_phone_integration_key', '')
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ''
+
+
+def _phone_channel_id_override(data: dict) -> str:
+    """告警 label 中的大写 FLASHCAT_CHANNEL_ID 优先于环境配置。"""
+    for alert in data.get('alerts', []):
+        value = alert.get('labels', {}).get('FLASHCAT_CHANNEL_ID', '')
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            value = str(value).strip()
+            if value:
+                return value
+    return ''
+
 
 def _make_dedup_key(data: dict) -> str:
     """用所有 firing alert 的 fingerprint 生成去重 key（仅用于 firing 批次）"""
@@ -70,7 +133,14 @@ def _make_label_dedup_key(data: dict, group_id: str) -> str:
         alerts = data.get('alerts', [])
         if alerts:
             alertname = alerts[0].get('labels', {}).get('alertname', '')
-    raw = json.dumps({'alertname': alertname, 'group_id': group_id}, ensure_ascii=False, sort_keys=True)
+    identity = {'alertname': alertname, 'group_id': group_id}
+    phone_key = _phone_integration_key_override(data)
+    if phone_key:
+        identity['phone_integration_key'] = phone_key
+    channel_id = _phone_channel_id_override(data)
+    if channel_id:
+        identity['phone_channel_id'] = channel_id
+    raw = json.dumps(identity, ensure_ascii=False, sort_keys=True)
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -235,7 +305,7 @@ def _group_and_aggregate_by_alertname(sub_payloads: list) -> list:
 
     仅聚合 firing 子批次；resolved 子批次（原始顶层 status=resolved）保持独立。
     """
-    firing_groups: dict[str, list] = {}   # alertname -> [sub_payload, ...]
+    firing_groups: dict = {}   # 聚合键 -> [sub_payload, ...]
     resolved_payloads: list = []
 
     for sub in sub_payloads:
@@ -256,7 +326,9 @@ def _group_and_aggregate_by_alertname(sub_payloads: list) -> list:
             # 无 alertname 无法聚合，保持独立
             firing_groups.setdefault(f'__no_name_{id(sub)}', []).append(sub)
         else:
-            group_key = f'{alertname}||{tenant}'
+            # 不同电话 webhook 配置必须独立发送，避免聚合后使用首条实例的配置。
+            phone_key = _phone_integration_key_override(sub)
+            group_key = (alertname, tenant, phone_key, _phone_channel_id_override(sub))
             firing_groups.setdefault(group_key, []).append(sub)
 
     aggregated = []
@@ -752,6 +824,9 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
     Returns:
         dict: 处理结果
     """
+    if _is_all_resolved(data):
+        _reset_night_phone_for_resolved(data, config_row.get('group_id', ''))
+
     # 解包 4-tuple（新签名）
     alerts, severities, maid, grafana_urls = alert_data_api(
         data,
@@ -828,9 +903,10 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
     # becomes an explicit P0 fallback and skips all phone API calls.
     phone_degradation_reason = None
     if is_phone_alert and not is_resolved:
-        if not Config.FLASHCAT_APP_KEY:
+        phone_degradation_reason = _night_phone_degradation_reason(data, config_row.get('group_id', ''))
+        if not phone_degradation_reason and not Config.FLASHCAT_APP_KEY:
             phone_degradation_reason = "Flashcat APP_KEY is not configured; \u7535\u8bdd\u544a\u8b66\u5df2\u964d\u7ea7\u4e3a P0"
-        else:
+        elif not phone_degradation_reason:
             flashcat_available, probe_reason = probe_flashcat_api(maid=maid)
             if not flashcat_available:
                 phone_degradation_reason = (
@@ -838,7 +914,8 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
                 )
         if phone_degradation_reason:
             alert_severity = "p0"
-            logger.error(
+            alerts = ['severity: p0' if line.startswith('severity: ') else line for line in alerts]
+            logger.info(
                 "Phone alert downgraded to P0: maid=%s reason=%s",
                 maid, phone_degradation_reason
             )
@@ -1047,7 +1124,11 @@ def _create_phone_incident(data: dict, maid: str) -> str:
         str: 创建成功返回 incident_id，失败返回 None
     """
     app_key = Config.FLASHCAT_APP_KEY
-    channel_id = Config.FLASHCAT_CHANNEL_ID
+    integration_key_override = _phone_integration_key_override(data)
+    integration_key = integration_key_override or Config.FLASHCAT_PHONE_INTEGRATION_KEY
+    # 显式 channel label 最优先；仅指定 webhook key 时绕过全局 channel。
+    channel_id = (_phone_channel_id_override(data)
+                  or ('' if integration_key_override else Config.FLASHCAT_CHANNEL_ID))
 
     if not app_key:
         logger.error("Flashcat incident creation skipped because app key is missing: maid=%s", maid)
@@ -1056,8 +1137,10 @@ def _create_phone_incident(data: dict, maid: str) -> str:
     incident_id = None
     if channel_id:
         incident_id = create_phone_incident(data, app_key, channel_id, maid=maid)
+        if not incident_id:
+            logger.error("Flashcat incident/create failed, trying Event API fallback: maid=%s", maid)
     else:
-        logger.warning("Flashcat channel id missing, using Event API fallback: maid=%s", maid)
+        logger.info("Using phone Event API: maid=%s label_override=%s", maid, bool(integration_key_override))
     if incident_id:
         logger.info("Flashcat incident created: maid=%s incident_id=%s", maid, incident_id)
         # 将 incident_id 入库，供后续认领按钮使用
@@ -1065,8 +1148,6 @@ def _create_phone_incident(data: dict, maid: str) -> str:
             update_incident_id(maid, incident_id)
         return incident_id
     else:
-        integration_key = Config.FLASHCAT_PHONE_INTEGRATION_KEY
-        logger.error("Flashcat incident/create failed, trying Event API fallback: maid=%s", maid)
         incident_id = create_phone_incident_from_event(data, app_key, integration_key, maid)
         if incident_id:
             logger.info("Flashcat Event API created incident: maid=%s incident_id=%s", maid, incident_id)

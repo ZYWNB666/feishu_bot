@@ -209,6 +209,46 @@ POST http://localhost:3000/api/card_callback
 
 ## 💡 使用示例
 
+### 电话告警：夜间降级及 webhook 覆盖
+
+`severity=phone` 的告警在北京时间 **00:00（含）至 09:00（不含）**，
+同一规则、同一通知群在同一轮持续告警中，夜间前 3 次降级为 P0 群通知，
+第 4 次及以后正常触发电话；收到恢复通知后重置次数。
+09:00 至次日 00:00 沿用正常电话流程；电话服务不可用时仍按原逻辑降级为 P0。
+规则使用 Grafana rule UID，缺失时使用 alertname。计数在已有去重之后进行，
+去重拦截和恢复通知不计数，白天正常电话通知不增加夜间次数；跨天不重置。
+多实例聚合告警需全部已记录的实例恢复才重置，部分恢复保留累计次数。
+计数使用进程内缓存，服务重启或缓存容量淘汰会重置；多副本不共享计数。
+卡片注明夜间降级原因，原始 severity 标签保留，供静默及恢复关联使用。
+
+可在单条告警的 `labels` 中指定 Flashcat 电话通知渠道，标签名为大写
+`FLASHCAT_CHANNEL_ID`：
+
+```yaml
+labels:
+  severity: phone
+  FLASHCAT_CHANNEL_ID: "5502714125895"
+```
+
+告警 label 的非空值优先于环境变量 `FLASHCAT_CHANNEL_ID`；未声明、空字符串或
+纯空白时使用全局配置。不同 channel 的实例分开发送，避免聚合或去重时串用渠道。
+渠道创建失败时仍沿用原来的 Event API 回退流程。
+
+也可以在 `labels` 中声明电话 webhook 的 integration_key：
+
+```yaml
+labels:
+  severity: phone
+  flashcat_phone_integration_key: "your-integration-key"
+```
+
+同时声明两个 label 时，优先使用 label 中的 `FLASHCAT_CHANNEL_ID`，
+`flashcat_phone_integration_key` 用于失败后的 webhook 回退。
+仅声明非空 integration key label 时，优先使用指定 key 的 Flashcat Event API，
+即使已配置全局 `FLASHCAT_CHANNEL_ID` 也会使用该 webhook；旧接口回退同样使用此 key。
+未声明、空字符串或纯空白时，保持原来的全局 channel 优先及
+`FLASHCAT_PHONE_INTEGRATION_KEY` 默认回退行为。不同 key 的实例分开聚合通知。
+
 ### 趋势告警：按标签或全局启用
 
 部署保持单副本，先依次执行 `migrations/20261005_alert_trend_state.sql` 和
