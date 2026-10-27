@@ -76,14 +76,14 @@ def _night_phone_degradation_reason(data: dict, group_id: str) -> str | None:
         state = _night_phone_counts.get(key, {'count': 0, 'active': set()})
         active = state['active'] | {a['fingerprint'] for a in data.get('alerts', [])
                                     if a.get('status') == 'firing' and a.get('fingerprint')}
-        count = min(state['count'] + int(now.hour < 9), 4)
+        count = min(state['count'] + int(now.hour < 8), 4)
         _night_phone_counts.set(key, {'count': count, 'active': active})
-    if now.hour >= 9:
+    if now.hour >= 8:
         return None
     logger.info('event=phone.night group_id=%s rule=%s count=%s downgraded=%s',
                 group_id, key[0], count, count <= 3)
     if count <= 3:
-        return f'北京时间 00:00–09:00 夜间第 {count} 次电话告警，已降级为 P0；第 4 次起电话通知'
+        return f'北京时间 00:00–08:00 夜间第 {count} 次电话告警，已降级为 P0；第 4 次起电话通知'
     return None
 
 

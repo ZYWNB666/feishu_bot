@@ -49,12 +49,12 @@ class PhonePolicyTests(unittest.TestCase):
         self.assertIsNone(handler._night_phone_degradation_reason(self.data, 'g'))
         self.clock.now.assert_called_with(timezone(timedelta(hours=8)))
 
-    def test_daytime_does_not_count_and_nine_is_excluded(self):
-        for hour in (9, 12, 23):
+    def test_daytime_does_not_count_and_eight_is_excluded(self):
+        for hour in (8, 9, 12, 23):
             self.at(hour)
             self.assertIsNone(handler._night_phone_degradation_reason(self.data, 'g'))
         self.assertEqual(handler._night_phone_counts.get(('rule', 'g'))['count'], 0)
-        self.at(8)
+        self.clock.now.return_value = datetime(2026, 10, 21, 7, 59, 59, tzinfo=timezone(timedelta(hours=8)))
         self.assertIn('第 1 次', handler._night_phone_degradation_reason(self.data, 'g'))
 
     def test_rule_and_group_are_independent(self):
