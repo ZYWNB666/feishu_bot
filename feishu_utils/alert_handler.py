@@ -255,13 +255,15 @@ from alerts_format.savedb import (
     update_message_id,
     update_incident_id,
     save_card_content,
+    get_card_content,
     get_message_id_by_fingerprint,
     get_alerttime_by_fingerprint,
     get_all_fingerprints_by_fingerprint,
     get_maid_by_fingerprints,
 )
 from feishu_utils.event_handler import alert_to_feishu
-from feishu_utils.alert_card_biz import build_biz_firing_card, build_biz_resolved_card
+from feishu_utils.alert_card_biz import build_biz_firing_card
+from feishu_utils.resolved_card import build_resolved_card, mention_names
 from feishu_utils import trend_gate
 
 logger = logging.getLogger(__name__)
@@ -931,7 +933,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
         logger.info("trigger phone alert and create Flashcat incident: maid=%s", maid)
         incident_id = _create_phone_incident(data, maid)
 
-    # ---------- resolved 告警：尝试在话题中回复 ----------
+    # ---------- resolved 告警：原地更新原告警卡片 ----------
     if is_resolved:
         fingerprints = extract_fingerprints(data)
         thread_message_id = ''
@@ -963,24 +965,8 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
                     'reason': f'部分恢复，仍有 {len(remaining)} 个实例未恢复',
                 }
 
-        if template_type == 'biz':
-            raw_alerts = extract_alert_raw(data)
-            # 用 DB 中存储的实际触发时间覆盖 Grafana resolved 包中的 startsAt
-            # （Grafana 在 resolved 通知里会将 startsAt 重置为恢复时间，导致持续时长为 0）
-            for ra in raw_alerts:
-                fp = ra.get('fingerprint', '')
-                if fp:
-                    db_start = get_alerttime_by_fingerprint(fp, group_id=group_id)
-                    if db_start:
-                        ra['startsAt'] = db_start
-            common_labels = data.get('commonLabels', {})
-            content = build_biz_resolved_card(alertname, raw_alerts, grafana_urls, common_labels, mentioned_user_list)
-        else:
-            string_alert_info = _build_alert_message(alerts, maid=maid)
-            content = _build_ops_resolved_content(string_alert_info, alertname, mentioned_user_list)
-
         if not thread_message_id:
-            # 找不到源消息，无法在话题中回复，跳过不发送
+            # 找不到源消息，无法更新卡片，跳过不发送
             logger.warning(
                 "⚠️ 未找到源消息，跳过恢复告警通知: maid=%s group_id=%s fingerprints=%s",
                 maid, group_id, fingerprints
@@ -990,27 +976,46 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
                 'group_id': group_id,
                 'success': True,
                 'skipped': True,
-                'reason': '未找到源消息，无法在话题中回复',
+                'reason': '未找到源消息，无法更新卡片',
             }
 
         try:
-            feishu_client.reply_message(thread_message_id, 'interactive', content, reply_in_thread=True)
+            original = get_card_content(maid)
+            if not original:
+                message = feishu_client.get_message(thread_message_id)
+                original = ((message or {}).get('body') or {}).get('content')
+            original = json.loads(original) if isinstance(original, str) else original
+            if not isinstance(original, dict):
+                raise ValueError('无法读取原告警卡片，保留原消息等待重试')
+            raw_alerts = extract_alert_raw(data)
+            for alert in raw_alerts:
+                db_start = get_alerttime_by_fingerprint(alert.get('fingerprint', ''), group_id=group_id)
+                if db_start:
+                    alert['startsAt'] = db_start
+            try:
+                names = mention_names(original)
+            except Exception as exc:
+                logger.warning('读取通知人员姓名失败，保留普通用户 ID: %s', exc)
+                names = {}
+            content = build_resolved_card(original, raw_alerts, names)
+            feishu_client.patch_message(thread_message_id, content)
+            save_card_content(maid, content)
             logger.info(
-                "✅ 已在话题中回复恢复通知: maid=%s message_id=%s",
+                "✅ 已更新原告警卡片为恢复状态: maid=%s message_id=%s",
                 maid, thread_message_id
             )
             return {'alert_id': config_row.get('alert_id'), 'group_id': group_id, 'success': True}
         except Exception as e:
-            # 话题回复失败，不降级为新消息，避免恢复通知脱离上下文
+            # 更新失败保留失败状态供重试，不发送新消息或话题回复
             logger.error(
-                "❌ 话题回复失败，跳过恢复告警通知: maid=%s message_id=%s error=%s",
+                "❌ 原告警卡片恢复更新失败: maid=%s message_id=%s error=%s",
                 maid, thread_message_id, e
             )
             return {
                 'alert_id': config_row.get('alert_id'),
                 'group_id': group_id,
                 'success': False,
-                'error': f'话题回复失败: {e}',
+                'error': f'恢复卡片更新失败: {e}',
             }
 
     # ---------- firing 告警（含混合状态）----------
@@ -1054,7 +1059,7 @@ def _process_single_alert_config(data, config_row, alertname, feishu_client, *, 
             "alert message sent: maid=%s message_id=%s group_id=%s severity=%s incident_id=%s",
             maid, message_id, group_id, alert_severity, incident_id
         )
-        # 保存 message_id 供后续 resolved/静默话题回复
+        # 保存 message_id 供后续恢复更新/静默话题回复
         if maid:
             update_message_id(maid, message_id)
             # 保存原始卡片 JSON，供认领更新和自定义时间选择后恢复卡片使用。
