@@ -38,7 +38,7 @@ class PhonePolicyTests(unittest.TestCase):
     def at(self, hour, day=21):
         self.clock.now.return_value = datetime(2026, 10, day, hour, tzinfo=timezone(timedelta(hours=8)))
 
-    def test_first_three_then_fourth_and_later_call_across_days(self):
+    def test_first_three_then_fourth_and_reset_next_day(self):
         for i in range(1, 7):
             reason = handler._night_phone_degradation_reason(self.data, 'g')
             if i <= 3:
@@ -46,8 +46,28 @@ class PhonePolicyTests(unittest.TestCase):
             else:
                 self.assertIsNone(reason)
         self.at(0, day=22)
-        self.assertIsNone(handler._night_phone_degradation_reason(self.data, 'g'))
+        for i in range(1, 5):
+            reason = handler._night_phone_degradation_reason(self.data, 'g')
+            if i <= 3:
+                self.assertIn(f'第 {i} 次', reason)
+            else:
+                self.assertIsNone(reason)
         self.clock.now.assert_called_with(timezone(timedelta(hours=8)))
+
+    def test_midnight_resets_even_without_recovery_or_daytime_notifications(self):
+        self.at(7)
+        for _ in range(4):
+            handler._night_phone_degradation_reason(self.data, 'g')
+        self.clock.now.return_value = datetime(2026, 10, 21, 23, 59, 59,
+                                              tzinfo=timezone(timedelta(hours=8)))
+        self.assertIsNone(handler._night_phone_degradation_reason(self.data, 'g'))
+        self.at(0, day=22)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            reasons = list(executor.map(
+                lambda _: handler._night_phone_degradation_reason(self.data, 'g'), range(20)))
+        self.assertEqual(sum(reason is not None for reason in reasons), 3)
+        self.at(6, day=25)
+        self.assertIn('第 1 次', handler._night_phone_degradation_reason(self.data, 'g'))
 
     def test_daytime_does_not_count_and_eight_is_excluded(self):
         for hour in (8, 9, 12, 23):

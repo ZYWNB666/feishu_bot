@@ -43,7 +43,7 @@ _resolved_dedup_lock = threading.Lock()
 _alert_label_dedup_cache = BoundedTTLCache(maxsize=ALERT_DEDUP_CACHE_MAXSIZE, ttl=ALERT_LABEL_DEDUP_TTL)
 _alert_label_dedup_lock = threading.Lock()
 
-# 进程内记录持续告警的夜间次数，收到恢复后清除；跨天不重置。
+# 进程内记录持续告警的夜间次数，收到恢复后清除；北京时间跨天重置。
 _night_phone_counts = BoundedTTLCache(maxsize=ALERT_DEDUP_CACHE_MAXSIZE, ttl=float('inf'))
 _night_phone_lock = threading.Lock()
 
@@ -69,15 +69,17 @@ def _reset_night_phone_for_resolved(data: dict, group_id: str) -> None:
 
 
 def _night_phone_degradation_reason(data: dict, group_id: str) -> str | None:
-    """去重后调用；持续告警累计夜间次数，恢复后重新开始。"""
+    """去重后调用；持续告警累计当日夜间次数，恢复或北京时间跨天后重新开始。"""
     now = datetime.now(timezone(timedelta(hours=8)))
     key = _night_phone_key(data, group_id)
     with _night_phone_lock:
-        state = _night_phone_counts.get(key, {'count': 0, 'active': set()})
+        state = _night_phone_counts.get(key)
+        if state is None or state.get('date') != now.date():
+            state = {'count': 0, 'active': set()}
         active = state['active'] | {a['fingerprint'] for a in data.get('alerts', [])
                                     if a.get('status') == 'firing' and a.get('fingerprint')}
         count = min(state['count'] + int(now.hour < 8), 4)
-        _night_phone_counts.set(key, {'count': count, 'active': active})
+        _night_phone_counts.set(key, {'count': count, 'active': active, 'date': now.date()})
     if now.hour >= 8:
         return None
     logger.info('event=phone.night group_id=%s rule=%s count=%s downgraded=%s',
